@@ -341,4 +341,22 @@ describe("SidebarFolderTree render", () => {
 		assert.ok(openHtml.indexOf('data-sidebar-folder="maps"') < openHtml.indexOf('data-sidebar-chat="c_alg1"'));
 		assert.ok(openHtml.indexOf('data-sidebar-chat="c_maps2"') < openHtml.indexOf('data-sidebar-chat="c_alg1"'));
 	});
+
+	it("folderDrag wraps folder headers in drag rows; without it they are absent", () => {
+		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg"]), new Set());
+		const render = (folderDrag?: boolean) =>
+			renderToStaticMarkup(
+				<SidebarFolderTree
+					view={view}
+					onToggleFolder={() => {}}
+					renderChat={(c) => <span>{c.title}</span>}
+					folderDrag={folderDrag}
+				/>,
+			);
+
+		assert.ok(!render().includes("data-source-drag-row"), "no drag rows without folderDrag");
+		const html = render(true);
+		assert.ok(html.includes('data-source-drag-row="alg"'), "folder headers become drag rows");
+		assert.ok(html.includes('data-sidebar-folder="alg"'), "the header button stays inside the drag row");
+	});
 });

@@ -3,7 +3,17 @@
 import { useEffect, useRef, useState, type DragEvent, type ReactElement, type ReactNode, type Ref, type RefObject } from "react";
 import { HostDialog } from "@/components/host-dialog";
 import { SOURCE_DRAG_TYPE } from "@/components/source-folder-tree";
-import type { ChatListItem, ChatListResponse } from "@/src/core";
+import {
+	canMoveFolder,
+	chainSourceDirectory,
+	folderEntries,
+	type ChatListItem,
+	type ChatListResponse,
+	type SourceDirectory,
+	type SourceEntry,
+	type SourceFolder,
+	type SourceOrganization,
+} from "@/src/core";
 
 export type SidebarOrganization = NonNullable<ChatListResponse["organization"]>;
 export type SidebarFolder = SidebarOrganization["folders"][number];
@@ -15,7 +25,9 @@ export interface FolderTarget {
 
 export type FolderCommand =
 	| { action: "create-folder"; name: string; parentId: string | null }
-	| { action: "move"; kind: "source"; id: string; parentId: string | null };
+	| { action: "move"; kind: "source"; id: string; parentId: string | null }
+	| { action: "move"; kind: "folder"; id: string; parentId: string | null }
+	| { action: "rename-folder"; id: string; name: string };
 
 export type FolderPlan =
 	| { kind: "command"; command: FolderCommand }
@@ -82,6 +94,22 @@ export function folderTargets(organization: SidebarOrganization): FolderTarget[]
 	];
 }
 
+/** The sidebar snapshot carries the same folders/placements as the Chains
+ *  directory minus the version stamp canMoveFolder's state type wants. */
+const asSourceOrganization = (organization: SidebarOrganization): SourceOrganization => ({
+	version: 1,
+	folders: organization.folders,
+	placements: organization.placements,
+});
+
+/** folderTargets minus the folder itself and its descendants — canMoveFolder
+ *  rejects exactly those targets, so the current parent stays listed and
+ *  the dialog disables confirming it. */
+export function folderMoveTargets(organization: SidebarOrganization, folderId: string): FolderTarget[] {
+	const state = asSourceOrganization(organization);
+	return folderTargets(organization).filter((t) => t.id === null || canMoveFolder(state, folderId, t.id));
+}
+
 /**
  * Folder IDs from the root down to folderId inclusive — the chain the
  * sidebar expands after a write so the target is visible. [] for null or
@@ -116,37 +144,42 @@ export function readDragPayload(raw: string): { kind: "source" | "folder"; id: s
 	return { kind, id };
 }
 
-/** Whether the sidebar may drop the chat on target (folder id or null =
+/** Whether the sidebar may drop the item on target (folder id or null =
  *  Outside folders): exactly when the pre-send planner below would emit
  *  a command — a real change to an existing, legal target. */
-function canDropChat(
+function canDrop(
 	organization: SidebarOrganization,
 	chats: readonly ChatListItem[],
-	chatId: string,
+	item: { kind: "source" | "folder"; id: string },
 	target: string | null,
 ): boolean {
-	return planMoveChat(organization, chats, chatId, target).kind === "command";
+	const plan =
+		item.kind === "source"
+			? planMoveChat(organization, chats, item.id, target)
+			: planMoveFolder(organization, item.id, target);
+	return plan.kind === "command";
 }
 
 /**
- * Sidebar chat drag state. dragChatId arms only on a dragstart bubbled
- * from this list's own SourceDragRow payload (a teaching chat in chats);
- * drops are accepted only when the drop payload's kind and id equal
- * dragChatId's — foreign drags never become a move.
+ * Sidebar drag state. dragItem arms only on a dragstart bubbled from this
+ * list's own SourceDragRow payload (a teaching chat in chats, or an
+ * existing folder id); drops are accepted only when the drop payload's
+ * kind and id equal dragItem's — foreign drags never become a move.
  */
 export function useSidebarDrag(deps: {
 	organization: SidebarOrganization | null;
 	chats: readonly ChatListItem[];
 	moveChat: (chatId: string, parentId: string | null) => Promise<string | null>;
+	moveFolder: (folderId: string, parentId: string | null) => Promise<string | null>;
 }): {
-	dragChatId: string | null;
+	dragItem: { kind: "source" | "folder"; id: string } | null;
 	/** undefined = no highlighted target; null = Outside folders; string = folder id. */
 	dropTarget: string | null | undefined;
 	error: string | null;
 	containerProps: { onDragStart(e: DragEvent): void; onDragEnd(e: DragEvent): void };
 	targetProps(target: string | null): { onDragOver(e: DragEvent): void; onDragLeave(e: DragEvent): void; onDrop(e: DragEvent): void };
 } {
-	const [dragChatId, setDragChatId] = useState<string | null>(null);
+	const [dragItem, setDragItem] = useState<{ kind: "source" | "folder"; id: string } | null>(null);
 	const [dropTarget, setDropTarget] = useState<string | null | undefined>(undefined);
 	const [error, setError] = useState<string | null>(null);
 	const armTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -161,21 +194,25 @@ export function useSidebarDrag(deps: {
 			clearTimeout(armTimer.current);
 			const organization = deps.organization;
 			const payload = readDragPayload(e.dataTransfer.getData(SOURCE_DRAG_TYPE));
-			let armed: string | null = null;
-			if (organization !== null && payload !== null && payload.kind === "source") {
-				const chat = deps.chats.find((c) => c.id === payload.id);
-				if (chat !== undefined && (chat.kind ?? "teach") !== "practice") {
-					armed = chat.id;
+			let armed: { kind: "source" | "folder"; id: string } | null = null;
+			if (organization !== null && payload !== null) {
+				if (payload.kind === "source") {
+					const chat = deps.chats.find((c) => c.id === payload.id);
+					if (chat !== undefined && (chat.kind ?? "teach") !== "practice") {
+						armed = { kind: "source", id: chat.id };
+					}
+				} else if (organization.folders.some((f) => f.id === payload.id)) {
+					armed = { kind: "folder", id: payload.id };
 				}
 			}
 			armTimer.current = setTimeout(() => {
 				setError(null);
-				if (armed !== null) setDragChatId(armed);
+				if (armed !== null) setDragItem(armed);
 			}, 0);
 		},
 		onDragEnd() {
 			clearTimeout(armTimer.current);
-			setDragChatId(null);
+			setDragItem(null);
 			setDropTarget(undefined);
 		},
 	};
@@ -184,7 +221,7 @@ export function useSidebarDrag(deps: {
 		onDragOver(e: DragEvent) {
 			if (!Array.from(e.dataTransfer.types).includes(SOURCE_DRAG_TYPE)) return;
 			const organization = deps.organization;
-			if (dragChatId === null || organization === null || !canDropChat(organization, deps.chats, dragChatId, target)) {
+			if (dragItem === null || organization === null || !canDrop(organization, deps.chats, dragItem, target)) {
 				e.dataTransfer.dropEffect = "none";
 				setDropTarget((previous) => (previous === target ? undefined : previous));
 				return;
@@ -203,20 +240,21 @@ export function useSidebarDrag(deps: {
 			if (raw === "") return;
 			e.preventDefault();
 			e.stopPropagation();
-			const chatId = dragChatId;
-			setDragChatId(null);
+			const item = dragItem;
+			setDragItem(null);
 			setDropTarget(undefined);
 			const payload = readDragPayload(raw);
 			const organization = deps.organization;
-			if (payload === null || payload.kind !== "source" || chatId === null || payload.id !== chatId) return;
-			if (organization === null || !canDropChat(organization, deps.chats, chatId, target)) return;
-			void deps.moveChat(chatId, target).then((failure) => {
+			if (payload === null || item === null || payload.kind !== item.kind || payload.id !== item.id) return;
+			if (organization === null || !canDrop(organization, deps.chats, item, target)) return;
+			const write = payload.kind === "source" ? deps.moveChat(payload.id, target) : deps.moveFolder(payload.id, target);
+			void write.then((failure) => {
 				if (failure !== null) setError(failure);
 			});
 		},
 	});
 
-	return { dragChatId, dropTarget, error, containerProps, targetProps };
+	return { dragItem, dropTarget, error, containerProps, targetProps };
 }
 
 /** Pre-send validation against the freshest snapshot (server validation
@@ -254,6 +292,43 @@ export function planMoveChat(
 	}
 	if (currentChatFolder(organization, chat) === parentId) return { kind: "skip" };
 	return { kind: "command", command: { action: "move", kind: "source", id: chatId, parentId } };
+}
+
+/** Same pre-send validation for the folder move: folder and target must
+ *  exist, canMoveFolder rules out itself/descendants, and a target equal
+ *  to the current parent (unknown parentId reads as null) is a skip. */
+export function planMoveFolder(
+	organization: SidebarOrganization,
+	folderId: string,
+	parentId: string | null,
+): FolderPlan {
+	const folderById = folderIndex(organization);
+	const folder = folderById.get(folderId);
+	if (!folder) return { kind: "error", error: FOLDER_GONE_MESSAGE };
+	if (parentId !== null && !folderById.has(parentId)) {
+		return { kind: "error", error: FOLDER_GONE_MESSAGE };
+	}
+	if (!canMoveFolder(asSourceOrganization(organization), folderId, parentId)) {
+		return { kind: "error", error: "A folder cannot be moved into itself or its descendants." };
+	}
+	if (folderParentId(folderById, folder) === parentId) return { kind: "skip" };
+	return { kind: "command", command: { action: "move", kind: "folder", id: folderId, parentId } };
+}
+
+/** Pre-send validation for the folder rename: unknown folder is an error;
+ *  a blank name or the unchanged name (after trim) is a skip — the inline
+ *  editor's cancel, no write. */
+export function planRenameFolder(
+	organization: SidebarOrganization,
+	folderId: string,
+	name: string,
+): FolderPlan {
+	const folder = organization.folders.find((f) => f.id === folderId);
+	if (!folder) return { kind: "error", error: FOLDER_GONE_MESSAGE };
+	const trimmed = name.trim();
+	if (trimmed === "") return { kind: "skip" };
+	if (trimmed === folder.name) return { kind: "skip" };
+	return { kind: "command", command: { action: "rename-folder", id: folderId, name: trimmed } };
 }
 
 /**
@@ -542,11 +617,18 @@ export function NewFolderBody({
 	return renderFrame ? renderFrame(frame) : frame;
 }
 
+/** What the move dialog is moving: a chat (kind "source") or a folder —
+ *  the entity stays captured from menu-open so a snapshot refresh can't
+ *  swap the subject mid-edit. */
+export type MoveSubject =
+	| { kind: "source"; chat: ChatListItem }
+	| { kind: "folder"; folder: SidebarFolder };
+
 /**
  * The move-to-folder form's pure body — same SSR-pin pattern as
- * NewFolderBody (the testids stay move-chat-*). Move stays disabled
- * while the target equals the current folder: the planner would skip
- * the write anyway.
+ * NewFolderBody, shared by chat and folder moves (the testids stay
+ * move-chat-*). Move stays disabled while the target equals the current
+ * folder: the planner would skip the write anyway.
  */
 export function MoveTargetBody({
 	title,
@@ -651,38 +733,42 @@ export function NewFolderDialog({
 }
 
 /**
- * The move-chat dialog: mount it only while a chat is picked, keyed by
- * chat id, so every opening is a fresh form whose target starts at the
- * chat's current folder — a snapshot refresh can't reset the user's
- * choice. Initial focus lands in the target select.
+ * The one move-target dialog for chats and folders: mount it only while
+ * a subject is picked, keyed by subject id, so every opening is a fresh
+ * form whose target starts at the current folder/parent — a snapshot
+ * refresh can't reset the user's choice. Initial focus lands in the
+ * target select.
  */
 export function MoveTargetDialog({
-	chat,
+	subject,
 	organization,
 	onClose,
 	onSubmit,
 }: {
-	chat: ChatListItem;
+	subject: MoveSubject;
 	organization: SidebarOrganization;
 	onClose: () => void;
 	/** null = done (the dialog closes); a string is the error to show. */
-	onSubmit: (chatId: string, parentId: string | null) => Promise<string | null>;
+	onSubmit: (id: string, parentId: string | null) => Promise<string | null>;
 }): ReactNode {
-	const currentId = currentChatFolder(organization, chat);
+	const folderById = folderIndex(organization);
+	const currentId =
+		subject.kind === "source" ? currentChatFolder(organization, subject.chat) : folderParentId(folderById, subject.folder);
 	const [targetId, setTargetId] = useState<string | null>(currentId);
 	const selectRef = useRef<HTMLSelectElement | null>(null);
 	const { busy, error, submit } = useFolderSubmit({
-		onSubmit: () => onSubmit(chat.id, targetId),
+		onSubmit: () => onSubmit(subject.kind === "source" ? subject.chat.id : subject.folder.id, targetId),
 		onClose,
 		onFolderGone: () => setTargetId(null),
 	});
+	const targets = subject.kind === "source" ? folderTargets(organization) : folderMoveTargets(organization, subject.folder.id);
 
 	return (
 		<MoveTargetBody
-			title={chat.title}
+			title={subject.kind === "source" ? subject.chat.title : subject.folder.name}
 			currentId={currentId}
 			targetId={targetId}
-			targets={folderTargets(organization)}
+			targets={targets}
 			busy={busy}
 			error={error}
 			onTarget={setTargetId}
@@ -692,4 +778,56 @@ export function MoveTargetDialog({
 			renderFrame={(frame) => <FolderDialogFrame frame={frame} busy={busy} onClose={onClose} initialFocusRef={selectRef} />}
 		/>
 	);
+}
+
+/**
+ * Everything "Delete folder…" offers the shared DeleteSourceDialog: the
+ * folder's whole Chains-visible content — itself and every descendant
+ * folder, plus the directory sources placed anywhere inside (practice
+ * chats are Chains-hidden, so they stay out). Sources keep the
+ * directory's order; folders keep the organization's.
+ */
+export function deleteFolderSelection(
+	directory: SourceDirectory,
+	folderId: string,
+): { sources: SourceEntry[]; folders: SourceFolder[] } {
+	const visible = chainSourceDirectory(directory);
+	const entries = folderEntries(visible, folderId);
+	const sourceIds = new Set(entries.sources);
+	const folderIds = new Set(entries.folders);
+	return {
+		sources: visible.sources.filter((s) => sourceIds.has(s.id)),
+		folders: directory.organization.folders.filter((f) => folderIds.has(f.id)),
+	};
+}
+
+/**
+ * DELETE /api/graph/sources with the folder deletion's JSON — the same
+ * call Chains makes (chain-table's onDelete). Non-ok throws the body's
+ * error string (fallback "Could not delete sources."); a thrown fetch or
+ * an unreadable body throws the same fallback. On ok returns the body's
+ * numeric graphRevision, or undefined when absent/non-number.
+ */
+export async function deleteSources(
+	request: { sourceIds: string[]; folderIds: string[]; deleteSessions: boolean },
+	fetchImpl: typeof fetch = fetch,
+): Promise<{ graphRevision: number | undefined }> {
+	let res: Response;
+	try {
+		res = await fetchImpl("/api/graph/sources", {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+	} catch {
+		throw new Error("Could not delete sources.");
+	}
+	const body = (await res.json().catch(() => null)) as { error?: unknown; graphRevision?: unknown } | null;
+	if (!res.ok) {
+		const message = body?.error;
+		throw new Error(typeof message === "string" ? message : "Could not delete sources.");
+	}
+	if (body === null) throw new Error("Could not delete sources.");
+	const graphRevision = body.graphRevision;
+	return { graphRevision: typeof graphRevision === "number" ? graphRevision : undefined };
 }
