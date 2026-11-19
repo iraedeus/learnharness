@@ -1,10 +1,11 @@
 /**
- * SIDEBAR CHAT DRAG & DROP (chat-folders S05, 2026-11-19):
- * useSidebarChatDrag owns the gesture — a dragstart bubbled from the
- * list's own SourceDragRow payload arms it, folder headers and the
- * Outside folders zone are the only targets, and a drop rides the same
- * moveChat as the menu path. Foreign payloads, practice chats, the
- * current folder and mismatched ids never become a move.
+ * SIDEBAR DRAG & DROP (chat-folders S05 + S06, 2026-11-19):
+ * useSidebarDrag owns the gesture — a dragstart bubbled from the
+ * list's own SourceDragRow payload arms it (a teaching chat or an
+ * existing folder), folder headers and the Outside folders zone are
+ * the only targets, and a drop rides the same moveChat/moveFolder as
+ * the menu path. Foreign payloads, practice chats, the current
+ * parent/folder and mismatched ids never become a move.
  * Same linkedom harness as source-tree-drag.test.tsx.
  */
 import React, { act, useState } from "react";
@@ -15,7 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { parseHTML } from "linkedom";
 import { SourceDragRow, SOURCE_DRAG_TYPE } from "../components/source-folder-tree.tsx";
 import { buildSidebarFolderView, SidebarFolderTree } from "../components/sidebar-folder-tree.tsx";
-import { useSidebarChatDrag } from "../components/sidebar-folder-actions.tsx";
+import { useSidebarDrag } from "../components/sidebar-folder-actions.tsx";
 import type { ChatListItem, ChatListResponse } from "../src/core/index.ts";
 
 const dom = parseHTML("<html><body></body></html>");
@@ -27,6 +28,7 @@ Object.assign(globalThis, {
 
 type TestOrg = NonNullable<ChatListResponse["organization"]>;
 type MoveChat = (chatId: string, parentId: string | null) => Promise<string | null>;
+type MoveFolder = (folderId: string, parentId: string | null) => Promise<string | null>;
 
 const STAMP = "2026-01-01T00:00:00.000Z";
 
@@ -63,11 +65,12 @@ const CHATS: ChatListItem[] = [
 ];
 
 /* Mirrors SessionsSidebar's wiring: the drag hook on the list container,
-   SourceDragRow around teaching chat rows only, the Outside folders zone
-   while a drag is armed, drop props into the tree, error above the list. */
-function Harness({ moveChat }: { moveChat: MoveChat }) {
+   SourceDragRow around teaching chat rows only, folder headers draggable
+   via folderDrag, the Outside folders zone while a drag is armed, drop
+   props into the tree, error above the list. */
+function Harness({ moveChat, moveFolder }: { moveChat: MoveChat; moveFolder: MoveFolder }) {
 	const [expanded, setExpanded] = useState(() => new Set(["alg"]));
-	const drag = useSidebarChatDrag({ organization: ORG, chats: CHATS, moveChat });
+	const drag = useSidebarDrag({ organization: ORG, chats: CHATS, moveChat, moveFolder });
 	const view = buildSidebarFolderView(CHATS, ORG, "", expanded, new Set());
 	return (
 		<div>
@@ -75,7 +78,7 @@ function Harness({ moveChat }: { moveChat: MoveChat }) {
 				<div role="alert" data-testid="sidebar-folder-error">{drag.error}</div>
 			)}
 			<div data-testid="sidebar-list" {...drag.containerProps}>
-				{drag.dragChatId !== null && (
+				{drag.dragItem !== null && (
 					<div
 						data-testid="sidebar-root-drop"
 						data-drop-active={String(drag.dropTarget === null)}
@@ -94,6 +97,7 @@ function Harness({ moveChat }: { moveChat: MoveChat }) {
 							return next;
 						})
 					}
+					folderDrag
 					drop={{ activeTarget: drag.dropTarget, targetProps: drag.targetProps }}
 					renderChat={(c) => {
 						const row = <button type="button" data-testid={`chat-row-${c.id}`}>{c.title}</button>;
@@ -112,20 +116,28 @@ function Harness({ moveChat }: { moveChat: MoveChat }) {
 
 let root: Root | undefined, host: HTMLDivElement | undefined;
 let moves: Array<{ chatId: string; parentId: string | null }>;
+let folderMoves: Array<{ folderId: string; parentId: string | null }>;
 
-async function mount(moveChat?: MoveChat) {
+async function mount(moveChat?: MoveChat, moveFolder?: MoveFolder) {
 	moves = [];
+	folderMoves = [];
 	host = document.createElement("div");
 	document.body.appendChild(host);
 	root = createRoot(host);
-	const handler =
+	const chatHandler =
 		moveChat ??
 		(async (chatId: string, parentId: string | null) => {
 			moves.push({ chatId, parentId });
 			return null;
 		});
+	const folderHandler =
+		moveFolder ??
+		(async (folderId: string, parentId: string | null) => {
+			folderMoves.push({ folderId, parentId });
+			return null;
+		});
 	await act(async () => {
-		root!.render(<Harness moveChat={handler} />);
+		root!.render(<Harness moveChat={chatHandler} moveFolder={folderHandler} />);
 	});
 }
 afterEach(async () => {
@@ -314,4 +326,56 @@ it("a moveChat error string renders in the panel's alert region", async () => {
 	assert.ok(alert, "the error region renders");
 	assert.equal(alert.getAttribute("role"), "alert");
 	assert.match(alert.textContent ?? "", /Could not save the folder change\./);
+});
+
+it("dragging a folder header arms the same next-task gesture and drops it on the root zone via moveFolder", async () => {
+	await mount();
+	const data = transfer();
+	const before = document.querySelector('[data-testid="sidebar-list"]')!.innerHTML;
+	const row = document.querySelector('[data-source-drag-row="maps"]')!;
+	assert.ok(row, "the folder header is a drag row");
+
+	act(() => {
+		const event = new dom.window.Event("dragstart", { bubbles: true, cancelable: true });
+		Object.defineProperty(event, "dataTransfer", { value: data });
+		Object.defineProperty(event, "clientX", { value: 100 });
+		Object.defineProperty(event, "clientY", { value: 100 });
+		row.dispatchEvent(event);
+	});
+	assert.equal(
+		document.querySelector('[data-testid="sidebar-list"]')!.innerHTML,
+		before,
+		"a folder dragstart leaves the DOM unchanged synchronously, like a chat's",
+	);
+	await act(async () => {
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	});
+	assert.ok(document.querySelector('[data-testid="sidebar-root-drop"]'), "the zone appears once armed");
+
+	await fire('[data-testid="sidebar-root-drop"]', "drop", data);
+	assert.deepEqual(folderMoves, [{ folderId: "maps", parentId: null }]);
+	assert.deepEqual(moves, [], "a folder drop never reaches moveChat");
+});
+
+it("a folder cannot drop on its current parent or a descendant: no highlight, no move", async () => {
+	await mount();
+	const data = transfer();
+	await fire('[data-source-drag-row="maps"]', "dragstart", data);
+	// Maps' current parent is Algebra.
+	const overParent = await fire('[data-sidebar-folder="alg"]', "dragover", data);
+	assert.equal(overParent.defaultPrevented, false, "the current parent is not a target");
+	assert.equal(data.dropEffect, "none");
+	assert.equal(document.querySelector('[data-drop-active="true"]'), null);
+	await fire('[data-sidebar-folder="alg"]', "drop", data);
+
+	// Algebra onto its descendant Maps.
+	const second = transfer();
+	await fire('[data-source-drag-row="alg"]', "dragstart", second);
+	const overDescendant = await fire('[data-sidebar-folder="maps"]', "dragover", second);
+	assert.equal(overDescendant.defaultPrevented, false, "a descendant is not a target");
+	assert.equal(second.dropEffect, "none");
+	await fire('[data-sidebar-folder="maps"]', "drop", second);
+
+	assert.deepEqual(folderMoves, []);
+	assert.deepEqual(moves, []);
 });

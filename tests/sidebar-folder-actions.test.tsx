@@ -13,20 +13,26 @@ import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
 	canDropChat,
+	canDropItem,
 	createFolderWriter,
 	currentChatFolder,
+	deleteFolderSelection,
+	deleteSources,
+	folderMoveTargets,
 	folderPath,
 	folderTargets,
 	MoveChatBody,
 	NewFolderBody,
 	planCreateFolder,
 	planMoveChat,
+	planMoveFolder,
+	planRenameFolder,
 	postFolderCommand,
 	readDragPayload,
 	type FolderCommand,
 	type FolderWriteResult,
 } from "../components/sidebar-folder-actions.tsx";
-import type { ChatListItem, ChatListResponse } from "../src/core/index.ts";
+import type { ChatListItem, ChatListResponse, SourceDirectory } from "../src/core/index.ts";
 
 type TestOrg = NonNullable<ChatListResponse["organization"]>;
 
@@ -460,5 +466,206 @@ describe("MoveChatBody", () => {
 		assert.ok(busy.includes('role="alert"'));
 		assert.ok(busy.includes('data-testid="move-chat-error"'));
 		assert.ok(busy.includes("Practice sessions stay outside folders."));
+	});
+});
+
+describe("folderMoveTargets", () => {
+	it("drops the folder itself and every descendant, keeps Outside folders and unrelated folders", () => {
+		assert.deepEqual(
+			folderMoveTargets(ORG, "alg").map((t) => t.label),
+			["Outside folders", "Notes only"],
+			"Algebra and its descendant Maps are both gone",
+		);
+		assert.deepEqual(
+			folderMoveTargets(ORG, "maps").map((t) => t.id),
+			[null, "alg", "notes"],
+			"the parent stays a target — the dialog disables confirming it, like the chat move",
+		);
+
+		const deep: TestOrg = {
+			folders: [
+				{ id: "a", name: "A", parentId: null, createdAt: STAMP },
+				{ id: "b", name: "B", parentId: "a", createdAt: STAMP },
+				{ id: "c", name: "C", parentId: "b", createdAt: STAMP },
+				{ id: "z", name: "Z", parentId: null, createdAt: STAMP },
+			],
+			placements: {},
+		};
+		assert.deepEqual(
+			folderMoveTargets(deep, "a").map((t) => t.id),
+			[null, "z"],
+			"grandchildren are excluded too",
+		);
+	});
+});
+
+describe("planMoveFolder", () => {
+	it("rejects an unknown folder or target, rejects moving into itself or a descendant", () => {
+		assert.deepEqual(planMoveFolder(ORG, "ghost", null), {
+			kind: "error",
+			error: "That folder no longer exists.",
+		});
+		assert.deepEqual(planMoveFolder(ORG, "alg", "ghost"), {
+			kind: "error",
+			error: "That folder no longer exists.",
+		});
+		assert.deepEqual(planMoveFolder(ORG, "alg", "alg"), {
+			kind: "error",
+			error: "A folder cannot be moved into itself or its descendants.",
+		});
+		assert.deepEqual(planMoveFolder(ORG, "alg", "maps"), {
+			kind: "error",
+			error: "A folder cannot be moved into itself or its descendants.",
+		});
+	});
+
+	it("skips a move to the current parent — root → null included — and commands a real move", () => {
+		assert.deepEqual(planMoveFolder(ORG, "alg", null), { kind: "skip" }, "root → Outside folders is a no-op");
+		assert.deepEqual(planMoveFolder(ORG, "maps", "alg"), { kind: "skip" }, "same parent is a no-op");
+		assert.deepEqual(planMoveFolder(ORG, "alg", "notes"), {
+			kind: "command",
+			command: { action: "move", kind: "folder", id: "alg", parentId: "notes" },
+		});
+		assert.deepEqual(planMoveFolder(ORG, "maps", null), {
+			kind: "command",
+			command: { action: "move", kind: "folder", id: "maps", parentId: null },
+		});
+
+		const dangling: TestOrg = {
+			folders: [{ id: "x", name: "X", parentId: "ghost", createdAt: STAMP }],
+			placements: {},
+		};
+		assert.deepEqual(planMoveFolder(dangling, "x", null), { kind: "skip" }, "an unknown parent reads as null");
+		assert.deepEqual(planMoveFolder(dangling, "x", "x"), {
+			kind: "error",
+			error: "A folder cannot be moved into itself or its descendants.",
+		});
+	});
+});
+
+describe("planRenameFolder", () => {
+	it("rejects an unknown folder, skips blank or unchanged names, commands a trimmed rename", () => {
+		assert.deepEqual(planRenameFolder(ORG, "ghost", "New"), {
+			kind: "error",
+			error: "That folder no longer exists.",
+		});
+		assert.deepEqual(planRenameFolder(ORG, "alg", "   "), { kind: "skip" }, "blank cancels without a write");
+		assert.deepEqual(planRenameFolder(ORG, "alg", "  Algebra  "), { kind: "skip" }, "same name after trim is a no-op");
+		assert.deepEqual(planRenameFolder(ORG, "alg", "  Algebra II "), {
+			kind: "command",
+			command: { action: "rename-folder", id: "alg", name: "Algebra II" },
+		});
+	});
+});
+
+describe("deleteFolderSelection", () => {
+	/* A Chains-shaped directory: nested folders, a notes source and a
+	   practice chat placed inside — Chains hides it, so the folder delete
+	   must not offer it either. */
+	const DIRECTORY: SourceDirectory = {
+		organization: {
+			version: 1,
+			folders: [
+				{ id: "alg", name: "Algebra", parentId: null, createdAt: STAMP },
+				{ id: "maps", name: "Maps", parentId: "alg", createdAt: STAMP },
+				{ id: "notes", name: "Notes", parentId: null, createdAt: STAMP },
+			],
+			placements: {
+				c_alg: { folderId: "alg" },
+				c_maps: { folderId: "maps" },
+				c_prac: { folderId: "maps" },
+				n1: { folderId: "alg" },
+				out: { folderId: null },
+			},
+		},
+		sources: [
+			{ id: "c_alg", kind: "chat", label: "Algebra chat", createdAt: STAMP },
+			{ id: "c_maps", kind: "chat", label: "Maps chat", createdAt: STAMP },
+			{ id: "c_prac", kind: "chat", chatKind: "practice", label: "Practice", createdAt: STAMP },
+			{ id: "n1", kind: "notes", label: "A note", createdAt: STAMP },
+			{ id: "out", kind: "notes", label: "Outside note", createdAt: STAMP },
+			{ id: "root", kind: "notes", label: "Root note", createdAt: STAMP },
+		],
+	};
+
+	it("collects the folder's and its descendants' visible sources plus the descendant folders, in order", () => {
+		const selection = deleteFolderSelection(DIRECTORY, "alg");
+		assert.deepEqual(
+			selection.sources.map((s) => s.id),
+			["c_alg", "c_maps", "n1"],
+			"teaching chats in alg and its descendant maps, plus the notes source — the hidden practice chat and outside sources stay out",
+		);
+		assert.deepEqual(
+			selection.folders.map((f) => f.id),
+			["alg", "maps"],
+			"the folder itself and its descendants in organization order",
+		);
+		assert.equal(selection.sources.find((s) => s.id === "c_prac"), undefined);
+	});
+});
+
+describe("deleteSources", () => {
+	const request = { sourceIds: ["a", "b"], folderIds: ["f"], deleteSessions: true };
+
+	it("DELETEs /api/graph/sources with the exact JSON and returns the graph revision", async () => {
+		const calls: Array<{ url: unknown; init: RequestInit | undefined }> = [];
+		const fetchImpl: typeof fetch = async (url, init) => {
+			calls.push({ url, init });
+			return Response.json({ sources: [], organization: { version: 1, folders: [], placements: {} }, graphRevision: 42 });
+		};
+		const result = await deleteSources(request, fetchImpl);
+		assert.deepEqual(result, { graphRevision: 42 });
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0]?.url, "/api/graph/sources");
+		assert.equal(calls[0]?.init?.method, "DELETE");
+		assert.deepEqual(calls[0]?.init?.headers, { "Content-Type": "application/json" });
+		assert.equal(calls[0]?.init?.body, JSON.stringify(request));
+	});
+
+	it("a missing or non-number graphRevision reads as undefined", async () => {
+		const noRevision: typeof fetch = async () => Response.json({ sources: [] });
+		assert.deepEqual(await deleteSources(request, noRevision), { graphRevision: undefined });
+		const stringRevision: typeof fetch = async () => Response.json({ graphRevision: "7" });
+		assert.deepEqual(await deleteSources(request, stringRevision), { graphRevision: undefined });
+	});
+
+	it("a non-ok status throws the body's error, or the fallback when there is none", async () => {
+		const withMessage: typeof fetch = async () => Response.json({ error: "Folder is not empty." }, { status: 500 });
+		await assert.rejects(deleteSources(request, withMessage), /^Error: Folder is not empty\.$/);
+
+		const noMessage: typeof fetch = async () => Response.json({}, { status: 500 });
+		await assert.rejects(deleteSources(request, noMessage), /^Error: Could not delete sources\.$/);
+	});
+
+	it("a thrown fetch or unreadable body throws the fallback", async () => {
+		const thrown: typeof fetch = async () => {
+			throw new Error("network down");
+		};
+		await assert.rejects(deleteSources(request, thrown), /^Error: Could not delete sources\.$/);
+
+		const unreadable: typeof fetch = async () => new Response("not json", { status: 200 });
+		await assert.rejects(deleteSources(request, unreadable), /^Error: Could not delete sources\.$/);
+	});
+});
+
+describe("canDropItem", () => {
+	it("folder rules: not itself or a descendant, not the current parent, target must exist", () => {
+		const chats = [chat("c_alg")];
+		const folder = { kind: "folder" as const, id: "alg" };
+		const maps = { kind: "folder" as const, id: "maps" };
+		assert.equal(canDropItem(ORG, chats, folder, "alg"), false, "onto itself");
+		assert.equal(canDropItem(ORG, chats, folder, "maps"), false, "onto a descendant");
+		assert.equal(canDropItem(ORG, chats, folder, null), false, "root → Outside folders is a no-op");
+		assert.equal(canDropItem(ORG, chats, maps, "alg"), false, "nested → its current parent is a no-op");
+		assert.equal(canDropItem(ORG, chats, folder, "ghost"), false, "unknown target");
+		assert.equal(canDropItem(ORG, chats, { kind: "folder", id: "ghost" }, "notes"), false, "unknown folder");
+		assert.equal(canDropItem(ORG, chats, folder, "notes"), true, "another existing folder");
+		assert.equal(canDropItem(ORG, chats, maps, null), true, "nested folder → Outside folders");
+	});
+
+	it("a source item delegates to the chat rule", () => {
+		const chats = [chat("c_alg")];
+		assert.equal(canDropItem(ORG, chats, { kind: "source", id: "c_alg" }, "maps"), true);
+		assert.equal(canDropItem(ORG, chats, { kind: "source", id: "c_alg" }, "alg"), false);
 	});
 });

@@ -392,4 +392,55 @@ describe("SidebarFolderTree render", () => {
 		assert.ok(html.indexOf('data-sidebar-folder="maps"') < html.indexOf('data-sidebar-chat="c_alg1"'));
 		assert.ok(html.indexOf('data-sidebar-chat="c_maps2"') < html.indexOf('data-sidebar-chat="c_alg1"'));
 	});
+
+	it("renamingFolderId swaps that folder's header button for the inline rename input; other folders are unchanged", () => {
+		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg", "maps"]), new Set());
+		const html = renderToStaticMarkup(
+			<SidebarFolderTree
+				view={view}
+				onToggleFolder={() => {}}
+				renderChat={(c) => <span>{c.title}</span>}
+				renamingFolderId="alg"
+				onRenameFolder={() => {}}
+				onCancelRenameFolder={() => {}}
+			/>,
+		);
+
+		assert.equal((html.match(/data-testid="sidebar-folder-rename"/g) ?? []).length, 1, "one rename input");
+		const input = html.match(/<input[^>]*data-testid="sidebar-folder-rename"[^>]*>/);
+		assert.ok(input, "the rename input renders");
+		assert.ok(input[0].includes('aria-label="Folder name"'));
+		assert.ok(input[0].includes('value="Algebra"'), "initial value is the current name");
+		assert.ok(!/<button[^>]*data-sidebar-folder="alg"/.test(html), "the renamed folder has no header button");
+		assert.ok(/<button[^>]*data-sidebar-folder="maps"/.test(html), "other folder headers keep their buttons");
+	});
+
+	it("folderDrag wraps every folder header in a draggable source row; without it the rows are absent", () => {
+		/* alg expanded so its child maps renders too — a collapsed folder's
+		   descendants have no header to wrap. */
+		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg"]), new Set());
+		const render = (folderDrag?: boolean) =>
+			renderToStaticMarkup(
+				<SidebarFolderTree
+					view={view}
+					onToggleFolder={() => {}}
+					renderChat={(c) => <span>{c.title}</span>}
+					folderDrag={folderDrag}
+				/>,
+			);
+
+		const plain = render();
+		assert.ok(!plain.includes("data-source-drag-row"), "no drag rows without folderDrag");
+
+		const html = render(true);
+		for (const f of FOLDERS) {
+			assert.ok(html.includes(`data-source-drag-row="${f.id}"`), `${f.id} is a drag source`);
+		}
+		assert.equal(
+			(html.match(/draggable="true"/g) ?? []).length,
+			FOLDERS.length,
+			"every folder header row is draggable",
+		);
+		assert.ok(html.includes('data-sidebar-folder="alg"'), "the header button stays inside the drag row");
+	});
 });

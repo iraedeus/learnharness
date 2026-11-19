@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { MenuShell } from "@/components/menu-shell";
 import { DeleteSessionDialog } from "@/components/delete-session-dialog";
+import { DeleteSourceDialog } from "@/components/delete-source-dialog";
 import type { ChatDeleteMode, ThemeMode } from "@/src/core";
 import { DumbbellIcon, FolderPlusIcon, PanelLeftCloseIcon, PanelLeftOpenIcon, PlusIcon, SearchIcon, SettingsIcon } from "lucide-react";
 import { ActivitySection } from "@/components/activity-dock";
@@ -18,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useServerEvent, useServerResync } from "@/components/server-events";
-import type { ChatListItem, ChatListResponse } from "@/src/core";
+import type { ChatListItem, ChatListResponse, SourceDirectory, SourceEntry, SourceFolder } from "@/src/core";
 import { kbdEventForAction } from "@/src/core";
 import { notifySettingsSaved } from "@/components/settings-signal";
 import { PluginWidgets } from "@/components/plugins";
@@ -27,14 +28,20 @@ import { createSidebarRefresh } from "@/components/sidebar-refresh";
 import { buildSidebarFolderView, enterKbdChat, nextKbdChat, SidebarFolderTree } from "@/components/sidebar-folder-tree";
 import {
 	createFolderWriter,
+	deleteFolderSelection,
+	deleteSources,
 	folderPath,
 	MoveChatDialog,
+	MoveFolderDialog,
 	NewFolderDialog,
 	planCreateFolder,
 	planMoveChat,
+	planMoveFolder,
+	planRenameFolder,
 	postFolderCommand,
+	type SidebarFolder,
 	type SidebarOrganization,
-	useSidebarChatDrag,
+	useSidebarDrag,
 } from "@/components/sidebar-folder-actions";
 import { SourceDragRow } from "@/components/source-folder-tree";
 import { HostContentRootContext, HostRouteLifetimeProvider } from "@/components/host-content-root";
@@ -426,6 +433,7 @@ function SessionsSidebar() {
 	const { open, toggle } = useSidebar();
 	const [snapshot, setSnapshot] = useState<ChatListResponse | null>(null);
 	const chats = snapshot?.chats ?? null;
+	const organization = snapshot?.organization ?? null;
 	const [query, setQuery] = useState("");
 	const [kindFilter, setKindFilter] = useState<SessionKindFilter>("all");
 	useEffect(() => {
@@ -587,7 +595,9 @@ function SessionsSidebar() {
 				if (!result.ok) return;
 				const org = orgRef.current;
 				if (org === null) return;
-				const ids = folderPath(org, command.parentId);
+				/* rename-folder carries no parentId — only placement
+				   writes (create/move) expand a target chain (S06). */
+				const ids = "parentId" in command ? folderPath(org, command.parentId) : [];
 				if (ids.length === 0) return;
 				setExpandedIds((prev) => {
 					const next = new Set(prev);
@@ -627,15 +637,56 @@ function SessionsSidebar() {
 		},
 		[folderWriter],
 	);
+	/* The folder twins of moveChat (chat-folders S06): same plan → writer
+	   shape. renameFolder also leaves rename mode and reports failures
+	   into the sidebar-folder-error alert the drag hook shares. */
+	const moveFolder = useCallback(
+		async (folderId: string, parentId: string | null): Promise<string | null> => {
+			const org = orgRef.current;
+			if (org === null) return "The folder list is unavailable.";
+			const plan = planMoveFolder(org, folderId, parentId);
+			if (plan.kind === "error") return plan.error;
+			if (plan.kind !== "command") return null;
+			const result = await folderWriter.write(plan.command);
+			return result.ok ? null : result.error;
+		},
+		[folderWriter],
+	);
+	const renameFolder = useCallback(
+		async (folderId: string, name: string): Promise<string | null> => {
+			setRenamingFolderId(null);
+			const org = orgRef.current;
+			if (org === null) {
+				setFolderError("The folder list is unavailable.");
+				return "The folder list is unavailable.";
+			}
+			const plan = planRenameFolder(org, folderId, name);
+			if (plan.kind === "error") {
+				setFolderError(plan.error);
+				return plan.error;
+			}
+			if (plan.kind !== "command") {
+				setFolderError(null);
+				return null;
+			}
+			const result = await folderWriter.write(plan.command);
+			const failure = result.ok ? null : result.error;
+			setFolderError(failure);
+			return failure;
+		},
+		[folderWriter],
+	);
 
-	/* Chat drag & drop (chat-folders S05): the hook owns the gesture —
-	   dragChatId arms only on a dragstart bubbled from this list's own
-	   SourceDragRow payload, folder headers plus the Outside folders zone
-	   are the targets, and a drop rides the same moveChat as the menu. */
-	const drag = useSidebarChatDrag({
-		organization: snapshot?.organization ?? null,
+	/* Chat & folder drag & drop (chat-folders S05/S06): the hook owns the
+	   gesture — dragItem arms only on a dragstart bubbled from this list's
+	   own SourceDragRow payload, folder headers plus the Outside folders
+	   zone are the targets, and a drop rides the same moveChat/moveFolder
+	   as the menus. */
+	const drag = useSidebarDrag({
+		organization,
 		chats: kindChats ?? [],
 		moveChat,
+		moveFolder,
 	});
 
 	useEffect(() => {
@@ -733,11 +784,78 @@ function SessionsSidebar() {
 	const [movingChat, setMovingChat] = useState<ChatListItem | null>(null);
 	const ctxChat = chats?.find((c) => c.id === ctxChatId) ?? null;
 
+	/* Folder manage (chat-folders S06): the folder context menu mirrors the
+	   session one — Rename swaps the header for the inline input, Move
+	   opens the folder picker, Delete loads the folder's whole
+	   Chains-visible content into the shared DeleteSourceDialog. Rename
+	   failures and a failed content read share the drag hook's alert. */
+	const [ctxFolderId, setCtxFolderId] = useState<string | null>(null);
+	const folderCtxAnchorRef = useRef<HTMLElement | null>(null);
+	const [movingFolder, setMovingFolder] = useState<SidebarFolder | null>(null);
+	const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
+	const [folderError, setFolderError] = useState<string | null>(null);
+	const [folderDeletion, setFolderDeletion] = useState<{ sources: SourceEntry[]; folders: SourceFolder[] } | null>(null);
+	const ctxFolder = organization?.folders.find((f) => f.id === ctxFolderId) ?? null;
+
 	const openContext = (e: React.MouseEvent<HTMLButtonElement>, chat: ChatListItem) => {
 		e.preventDefault(); // suppress the native menu
 		ctxAnchorRef.current = e.currentTarget;
 		setCtxChatId(chat.id);
 	};
+
+	const openFolderContext = (e: React.MouseEvent<HTMLButtonElement>, folder: SidebarFolder) => {
+		e.preventDefault(); // suppress the native menu
+		folderCtxAnchorRef.current = e.currentTarget;
+		setCtxFolderId(folder.id);
+	};
+
+	/* Delete folder… first reads the Chains directory — the dialog needs
+	   the folder's whole content (itself + descendants + placed sources),
+	   and a failed read reports into the same alert area. */
+	const openFolderDeletion = useCallback(async (folder: SidebarFolder) => {
+		setCtxFolderId(null);
+		try {
+			const res = await fetch("/api/graph/sources", { cache: "no-store" });
+			if (!res.ok) throw new Error(`directory read failed: ${res.status}`);
+			const directory = (await res.json()) as SourceDirectory;
+			setFolderDeletion(deleteFolderSelection(directory, folder.id));
+			setFolderError(null);
+		} catch {
+			setFolderError("Could not load the folder contents.");
+		}
+	}, []);
+
+	/* The dialog's confirm rides the shared DELETE route (chain-table's
+	   onDelete shape): failures THROW so the dialog renders them, and the
+	   sidebar still refreshes — a failed response can follow partial
+	   writes. Success bumps lh:graph-revision for Chains and navigates
+	   home when the open chat was among the deleted sessions. */
+	const deleteFolderContents = useCallback(
+		async (deleteSessions: boolean) => {
+			if (folderDeletion === null) return;
+			const sourceIds = folderDeletion.sources.map((s) => s.id);
+			const folderIds = folderDeletion.folders.map((f) => f.id);
+			const chatIds = new Set(
+				folderDeletion.sources.filter((s) => s.kind === "chat").map((s) => s.id),
+			);
+			try {
+				const { graphRevision } = await deleteSources({ sourceIds, folderIds, deleteSessions });
+				invalidate();
+				void refresh();
+				window.dispatchEvent(new CustomEvent("lh:graph-revision", { detail: { revision: graphRevision ?? 0 } }));
+				if (deleteSessions) {
+					const match = /^\/chat\/([^/]+)$/.exec(pathname);
+					const openId = match?.[1];
+					if (openId !== undefined && chatIds.has(openId)) router.push("/");
+				}
+			} catch (error) {
+				invalidate();
+				void refresh();
+				throw error;
+			}
+		},
+		[folderDeletion, pathname, router, invalidate, refresh],
+	);
 
 	// The menu contract (agent-section's): any pointerdown outside the menu
 	// or its row closes it; Esc is CLAIMED so it never also aborts a turn
@@ -755,6 +873,21 @@ function SessionsSidebar() {
 		document.addEventListener("pointerdown", onPointerDown);
 		return () => document.removeEventListener("pointerdown", onPointerDown);
 	}, [ctxChatId, interactions]);
+
+	// The folder menu follows the same contract (chat-folders S06): any
+	// pointerdown outside the menu or its folder header closes it.
+	useEffect(() => {
+		if (ctxFolderId === null) return;
+		const onPointerDown = (e: PointerEvent) => {
+			if (!interactions.isElementEligible(document.querySelector<HTMLElement>('[data-testid="folder-context-menu"]'))) return;
+			const target = e.target as Node;
+			if (target instanceof Element && target.closest("[data-lh-menu]")) return;
+			if (folderCtxAnchorRef.current?.contains(target)) return;
+			setCtxFolderId(null);
+		};
+		document.addEventListener("pointerdown", onPointerDown);
+		return () => document.removeEventListener("pointerdown", onPointerDown);
+	}, [ctxFolderId, interactions]);
 
 	// Inline rename (owner ruling, wave 6): the row swaps to a text input;
 	// commit rides the SAME plumbing as the header rename — PUT the title,
@@ -1006,13 +1139,13 @@ function SessionsSidebar() {
 					))}
 				</div>
 
-				{drag.error !== null && (
+				{(drag.error ?? folderError) !== null && (
 					<div role="alert" data-testid="sidebar-folder-error" className="mx-3 mb-1 text-xs text-error">
-						{drag.error}
+						{drag.error ?? folderError}
 					</div>
 				)}
 				<div ref={listRef} className="flex-1 overflow-y-auto p-2" {...drag.containerProps}>
-					{drag.dragChatId !== null && (
+					{drag.dragItem !== null && (
 						<div
 							data-testid="sidebar-root-drop"
 							data-drop-active={String(drag.dropTarget === null)}
@@ -1036,6 +1169,13 @@ function SessionsSidebar() {
 							view={view}
 							onToggleFolder={toggleFolder}
 							drop={{ activeTarget: drag.dropTarget, targetProps: drag.targetProps }}
+							folderDrag={organization !== null && query.trim() === ""}
+							renamingFolderId={renamingFolderId}
+							onRenameFolder={(id, name) => {
+								void renameFolder(id, name);
+							}}
+							onCancelRenameFolder={() => setRenamingFolderId(null)}
+							onFolderContextMenu={openFolderContext}
 							renderChat={(c) => {
 								/* Drag source (S05): only a teaching chat in the
 								   normal tree — a live organization, a blank
@@ -1190,6 +1330,52 @@ function SessionsSidebar() {
 					</MenuShell>
 				)}
 
+				{/* The folder context menu (chat-folders S06): the session
+				    menu's twin — same anchor/dismiss contract, only the
+				    folder management items. Shown only once the snapshot
+				    carries the organization. */}
+				{organization !== null && ctxFolderId !== null && (
+					<MenuShell onClose={() => { setCtxFolderId(null); return "closed"; }}
+						anchorRef={folderCtxAnchorRef}
+						testid="folder-context-menu"
+						preferredSide="down"
+						menuClass="flex w-52 flex-col gap-0.5 rounded-xl border bg-card p-2 text-xs shadow-xl"
+					>
+						<button
+							type="button"
+							data-testid="ctx-folder-rename"
+							onClick={() => {
+								setRenamingFolderId(ctxFolderId);
+								setCtxFolderId(null);
+							}}
+							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+						>
+							Rename
+						</button>
+						<button
+							type="button"
+							data-testid="ctx-folder-move"
+							onClick={() => {
+								if (ctxFolder !== null) setMovingFolder(ctxFolder);
+								setCtxFolderId(null);
+							}}
+							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-foreground transition-colors hover:bg-accent"
+						>
+							Move to folder…
+						</button>
+						<button
+							type="button"
+							data-testid="ctx-folder-delete"
+							onClick={() => {
+								if (ctxFolder !== null) void openFolderDeletion(ctxFolder);
+							}}
+							className="flex items-center rounded-lg px-2.5 py-1.5 text-left text-muted-foreground/80 transition-colors hover:bg-accent hover:text-foreground"
+						>
+							Delete folder…
+						</button>
+					</MenuShell>
+				)}
+
 				{/* The two-option delete dialog (wave 6) — portaled to body
 				    by the component itself, lives here for state locality. */}
 				<DeleteSessionDialog
@@ -1212,6 +1398,22 @@ function SessionsSidebar() {
 					organization={snapshot?.organization ?? EMPTY_ORGANIZATION}
 					onClose={() => setMovingChat(null)}
 					onSubmit={moveChat}
+				/>
+				{/* The folder twins (chat-folders S06): the move picker reuses
+				    the chat dialog's body; the delete dialog gets the folder's
+				    whole Chains-visible content from the directory read. */}
+				<MoveFolderDialog
+					folder={movingFolder}
+					organization={snapshot?.organization ?? EMPTY_ORGANIZATION}
+					onClose={() => setMovingFolder(null)}
+					onSubmit={moveFolder}
+				/>
+				<DeleteSourceDialog
+					open={folderDeletion !== null}
+					sources={folderDeletion?.sources ?? []}
+					folders={folderDeletion?.folders ?? []}
+					onClose={() => setFolderDeletion(null)}
+					onDelete={deleteFolderContents}
 				/>
 			</aside>
 	);
