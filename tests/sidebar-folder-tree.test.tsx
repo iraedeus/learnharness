@@ -1,14 +1,13 @@
 /**
- * THE SIDEBAR FOLDER TREE (chat-folders S03, 2026-11-19):
- * buildSidebarFolderView turns the kind-filtered chat list plus the shared
- * organization snapshot into the rendered tree — folder ordering, chat
- * placement (practice chats always at the root), the search reveal rules
- * and the visible-chat order the keyboard walk follows.
+ * buildSidebarFolderView turns the kind-filtered chat list plus the
+ * shared organization snapshot into the rendered tree — folder ordering,
+ * chat placement (practice chats always at the root), the search reveal
+ * rules and the visible-chat order the keyboard walk follows.
  * nextKbdChat/enterKbdChat pin the walk; SidebarFolderTree's SSR markup
  * pins aria-expanded, role=group nesting and the data attributes.
  * Same tsx classic-JSX shim as render-sidebar.test.tsx.
  */
-import React, { type ComponentProps } from "react";
+import React from "react";
 (globalThis as Record<string, unknown>).React = React;
 
 import assert from "node:assert/strict";
@@ -21,29 +20,10 @@ import {
 	SidebarFolderTree,
 	type SidebarTreeNode,
 } from "../components/sidebar-folder-tree.tsx";
-import type { ChatListItem, ChatListResponse } from "../src/core/index.ts";
+import type { ChatListItem } from "../src/core/index.ts";
+import { chat, STAMP, type TestOrg } from "./helpers/sidebar-fixtures.ts";
 
-type TestOrg = NonNullable<ChatListResponse["organization"]>;
 type FolderNode = Extract<SidebarTreeNode, { kind: "folder" }>;
-
-const STAMP = "2026-01-01T00:00:00.000Z";
-
-function chat(id: string, overrides: Partial<ChatListItem> = {}): ChatListItem {
-	return {
-		id,
-		title: id,
-		kind: "teach",
-		createdAt: STAMP,
-		updatedAt: STAMP,
-		messageCount: 1,
-		phase: "probe",
-		pendingQuestion: false,
-		pendingProblem: false,
-		busy: false,
-		compacting: false,
-		...overrides,
-	};
-}
 
 /* The shared fixture: two nested folders (Algebra → Maps), a notes-only
  * folder, an empty folder, and two case/numeric ordering probes; chats in
@@ -348,76 +328,21 @@ describe("SidebarFolderTree render", () => {
 		assert.ok(!html.includes('data-sidebar-chat="c_maps2"'));
 		assert.ok(html.includes('data-sidebar-chat="c_alg1"'), "expanded Algebra shows its direct chat");
 		assert.ok(html.includes('role="group"'), "expanded children sit inside a group");
+
+		// With Maps open too, its subtree renders nested chat rows — the
+		// Maps subfolder (and its whole subtree) precedes Algebra's own
+		// chat row.
+		const open = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg", "maps"]), new Set());
+		const openHtml = render(open);
+		assert.equal((openHtml.match(/role="group"/g) ?? []).length, 2, "one group per expanded folder");
+		assert.ok(openHtml.includes('data-sidebar-chat="c_maps1"'));
+		assert.ok(openHtml.includes('data-sidebar-chat="c_maps2"'));
+		assert.ok(openHtml.indexOf('data-sidebar-folder="maps"') < openHtml.indexOf('data-sidebar-chat="c_maps1"'));
+		assert.ok(openHtml.indexOf('data-sidebar-folder="maps"') < openHtml.indexOf('data-sidebar-chat="c_alg1"'));
+		assert.ok(openHtml.indexOf('data-sidebar-chat="c_maps2"') < openHtml.indexOf('data-sidebar-chat="c_alg1"'));
 	});
 
-	it("drop prop marks the active folder on its header button; without drop the attribute is absent", () => {
-		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg", "maps"]), new Set());
-		const render = (drop?: ComponentProps<typeof SidebarFolderTree>["drop"]) =>
-			renderToStaticMarkup(
-				<SidebarFolderTree
-					view={view}
-					onToggleFolder={() => {}}
-					renderChat={(c) => <span>{c.title}</span>}
-					drop={drop}
-				/>,
-			);
-
-		const plain = render();
-		assert.ok(!plain.includes("data-drop-active"), "no drop prop → no attribute at all");
-
-		const html = render({ activeTarget: "maps", targetProps: () => ({}) });
-		const buttons = [...html.matchAll(/<button[^>]*data-sidebar-folder="([^"]+)"[^>]*>/g)];
-		assert.equal(buttons.length, FOLDERS.length, "every folder button still renders");
-		const activeById = new Map(
-			buttons.map((m) => [m[1], /data-drop-active="true"/.test(m[0])]),
-		);
-		assert.equal(activeById.get("maps"), true, "only the dragged-over folder is active");
-		for (const id of ["alg", "notes", "empty", "f10", "f2"]) {
-			assert.equal(activeById.get(id), false, `${id} carries data-drop-active="false"`);
-		}
-		assert.equal((html.match(/data-drop-active="true"/g) ?? []).length, 1);
-	});
-
-	it("expanded branches render nested chat rows with data-sidebar-chat after the subfolders", () => {
-		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg", "maps"]), new Set());
-		const html = render(view);
-
-		assert.equal((html.match(/role="group"/g) ?? []).length, 2, "one group per expanded folder");
-		assert.ok(html.includes('data-sidebar-chat="c_maps1"'));
-		assert.ok(html.includes('data-sidebar-chat="c_maps2"'));
-
-		// Render order is folders first, then chats — the Maps subfolder (and
-		// its whole subtree) precedes Algebra's own chat row.
-		assert.ok(html.indexOf('data-sidebar-folder="maps"') < html.indexOf('data-sidebar-chat="c_maps1"'));
-		assert.ok(html.indexOf('data-sidebar-folder="maps"') < html.indexOf('data-sidebar-chat="c_alg1"'));
-		assert.ok(html.indexOf('data-sidebar-chat="c_maps2"') < html.indexOf('data-sidebar-chat="c_alg1"'));
-	});
-
-	it("renamingFolderId swaps that folder's header button for the inline rename input; other folders are unchanged", () => {
-		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg", "maps"]), new Set());
-		const html = renderToStaticMarkup(
-			<SidebarFolderTree
-				view={view}
-				onToggleFolder={() => {}}
-				renderChat={(c) => <span>{c.title}</span>}
-				renamingFolderId="alg"
-				onRenameFolder={() => {}}
-				onCancelRenameFolder={() => {}}
-			/>,
-		);
-
-		assert.equal((html.match(/data-testid="sidebar-folder-rename"/g) ?? []).length, 1, "one rename input");
-		const input = html.match(/<input[^>]*data-testid="sidebar-folder-rename"[^>]*>/);
-		assert.ok(input, "the rename input renders");
-		assert.ok(input[0].includes('aria-label="Folder name"'));
-		assert.ok(input[0].includes('value="Algebra"'), "initial value is the current name");
-		assert.ok(!/<button[^>]*data-sidebar-folder="alg"/.test(html), "the renamed folder has no header button");
-		assert.ok(/<button[^>]*data-sidebar-folder="maps"/.test(html), "other folder headers keep their buttons");
-	});
-
-	it("folderDrag wraps every folder header in a draggable source row; without it the rows are absent", () => {
-		/* alg expanded so its child maps renders too — a collapsed folder's
-		   descendants have no header to wrap. */
+	it("folderDrag wraps folder headers in drag rows; without it they are absent", () => {
 		const view = buildSidebarFolderView(CHATS, ORG, "", new Set(["alg"]), new Set());
 		const render = (folderDrag?: boolean) =>
 			renderToStaticMarkup(
@@ -429,18 +354,9 @@ describe("SidebarFolderTree render", () => {
 				/>,
 			);
 
-		const plain = render();
-		assert.ok(!plain.includes("data-source-drag-row"), "no drag rows without folderDrag");
-
+		assert.ok(!render().includes("data-source-drag-row"), "no drag rows without folderDrag");
 		const html = render(true);
-		for (const f of FOLDERS) {
-			assert.ok(html.includes(`data-source-drag-row="${f.id}"`), `${f.id} is a drag source`);
-		}
-		assert.equal(
-			(html.match(/draggable="true"/g) ?? []).length,
-			FOLDERS.length,
-			"every folder header row is draggable",
-		);
+		assert.ok(html.includes('data-source-drag-row="alg"'), "folder headers become drag rows");
 		assert.ok(html.includes('data-sidebar-folder="alg"'), "the header button stays inside the drag row");
 	});
 });

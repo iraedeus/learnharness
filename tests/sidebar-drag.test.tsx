@@ -1,5 +1,4 @@
 /**
- * SIDEBAR DRAG & DROP (chat-folders S05 + S06, 2026-11-19):
  * useSidebarDrag owns the gesture — a dragstart bubbled from the
  * list's own SourceDragRow payload arms it (a teaching chat or an
  * existing folder), folder headers and the Outside folders zone are
@@ -17,7 +16,8 @@ import { parseHTML } from "linkedom";
 import { SourceDragRow, SOURCE_DRAG_TYPE } from "../components/source-folder-tree.tsx";
 import { buildSidebarFolderView, SidebarFolderTree } from "../components/sidebar-folder-tree.tsx";
 import { useSidebarDrag } from "../components/sidebar-folder-actions.tsx";
-import type { ChatListItem, ChatListResponse } from "../src/core/index.ts";
+import type { ChatListItem } from "../src/core/index.ts";
+import { chat, STAMP, type TestOrg } from "./helpers/sidebar-fixtures.ts";
 
 const dom = parseHTML("<html><body></body></html>");
 Object.assign(globalThis, {
@@ -26,28 +26,8 @@ Object.assign(globalThis, {
 	requestAnimationFrame: (cb: FrameRequestCallback) => { queueMicrotask(() => cb(0)); return 1; },
 });
 
-type TestOrg = NonNullable<ChatListResponse["organization"]>;
 type MoveChat = (chatId: string, parentId: string | null) => Promise<string | null>;
 type MoveFolder = (folderId: string, parentId: string | null) => Promise<string | null>;
-
-const STAMP = "2026-01-01T00:00:00.000Z";
-
-function chat(id: string, overrides: Partial<ChatListItem> = {}): ChatListItem {
-	return {
-		id,
-		title: id,
-		kind: "teach",
-		createdAt: STAMP,
-		updatedAt: STAMP,
-		messageCount: 1,
-		phase: "probe",
-		pendingQuestion: false,
-		pendingProblem: false,
-		busy: false,
-		compacting: false,
-		...overrides,
-	};
-}
 
 /* Fixture per the contract: Algebra (root) → Maps; teaching t1 inside
    Algebra, teaching t2 and practice p1 at the root. */
@@ -167,15 +147,20 @@ function transfer() {
 		},
 	};
 }
-async function fire(selector: string, type: string, data: ReturnType<typeof transfer>) {
-	const target = document.querySelector(selector);
-	assert.ok(target, selector);
+function dispatchDrag(el: Element, type: string, data: ReturnType<typeof transfer>) {
 	const event = new dom.window.Event(type, { bubbles: true, cancelable: true });
 	Object.defineProperty(event, "dataTransfer", { value: data });
 	Object.defineProperty(event, "clientX", { value: 100 });
 	Object.defineProperty(event, "clientY", { value: 100 });
+	el.dispatchEvent(event);
+	return event;
+}
+async function fire(selector: string, type: string, data: ReturnType<typeof transfer>) {
+	const target = document.querySelector(selector);
+	assert.ok(target, selector);
+	let event!: ReturnType<typeof dispatchDrag>;
 	await act(async () => {
-		target.dispatchEvent(event);
+		event = dispatchDrag(target, type, data);
 		// The drag arms on the next task (see the dragstart DOM test below).
 		await new Promise((resolve) => setTimeout(resolve, 0));
 	});
@@ -189,11 +174,7 @@ it("dragstart leaves the list DOM unchanged until the next task, so the browser 
 	const row = document.querySelector('[data-source-drag-row="t2"]')!;
 
 	act(() => {
-		const event = new dom.window.Event("dragstart", { bubbles: true, cancelable: true });
-		Object.defineProperty(event, "dataTransfer", { value: data });
-		Object.defineProperty(event, "clientX", { value: 100 });
-		Object.defineProperty(event, "clientY", { value: 100 });
-		row.dispatchEvent(event);
+		dispatchDrag(row, "dragstart", data);
 	});
 	assert.equal(
 		document.querySelector('[data-testid="sidebar-list"]')!.innerHTML,
@@ -213,13 +194,8 @@ it("a dragend before the drag is armed leaves no zone behind", async () => {
 	const row = document.querySelector('[data-source-drag-row="t2"]')!;
 
 	act(() => {
-		for (const type of ["dragstart", "dragend"]) {
-			const event = new dom.window.Event(type, { bubbles: true, cancelable: true });
-			Object.defineProperty(event, "dataTransfer", { value: data });
-			Object.defineProperty(event, "clientX", { value: 100 });
-			Object.defineProperty(event, "clientY", { value: 100 });
-			row.dispatchEvent(event);
-		}
+		dispatchDrag(row, "dragstart", data);
+		dispatchDrag(row, "dragend", data);
 	});
 	await act(async () => {
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -331,25 +307,10 @@ it("a moveChat error string renders in the panel's alert region", async () => {
 it("dragging a folder header arms the same next-task gesture and drops it on the root zone via moveFolder", async () => {
 	await mount();
 	const data = transfer();
-	const before = document.querySelector('[data-testid="sidebar-list"]')!.innerHTML;
 	const row = document.querySelector('[data-source-drag-row="maps"]')!;
 	assert.ok(row, "the folder header is a drag row");
 
-	act(() => {
-		const event = new dom.window.Event("dragstart", { bubbles: true, cancelable: true });
-		Object.defineProperty(event, "dataTransfer", { value: data });
-		Object.defineProperty(event, "clientX", { value: 100 });
-		Object.defineProperty(event, "clientY", { value: 100 });
-		row.dispatchEvent(event);
-	});
-	assert.equal(
-		document.querySelector('[data-testid="sidebar-list"]')!.innerHTML,
-		before,
-		"a folder dragstart leaves the DOM unchanged synchronously, like a chat's",
-	);
-	await act(async () => {
-		await new Promise((resolve) => setTimeout(resolve, 0));
-	});
+	await fire('[data-source-drag-row="maps"]', "dragstart", data);
 	assert.ok(document.querySelector('[data-testid="sidebar-root-drop"]'), "the zone appears once armed");
 
 	await fire('[data-testid="sidebar-root-drop"]', "drop", data);

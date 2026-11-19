@@ -1,17 +1,18 @@
 /**
- * SIDEBAR FOLDER MANAGE (chat-folders S06, 2026-11-19): the inline folder
- * rename inside SidebarFolderTree — the header swaps to a text input that
- * commits the typed name on Enter (via blur) or blur, cancels on Escape,
- * and never double-commits. Same linkedom harness as commit-input.test.tsx:
- * the globals land BEFORE react-dom and the component are imported, or
- * React's input-event polyfill cannot map nodes to fibers.
+ * The inline folder rename inside SidebarFolderTree — the header swaps
+ * to a text input that commits the typed name on Enter (via blur) or
+ * blur, cancels on Escape, and never double-commits. Same linkedom
+ * harness as commit-input.test.tsx: the globals land BEFORE react-dom
+ * and the component are imported, or React's input-event polyfill
+ * cannot map nodes to fibers.
  */
 import React, { act, useState } from "react";
 (globalThis as Record<string, unknown>).React = React;
 import assert from "node:assert/strict";
 import { after, afterEach, it } from "node:test";
 import { parseHTML } from "linkedom";
-import type { ChatListItem, ChatListResponse } from "../src/core/index.ts";
+import type { ChatListItem } from "../src/core/index.ts";
+import { chat, STAMP, type TestOrg } from "./helpers/sidebar-fixtures.ts";
 
 const dom = parseHTML("<html><body></body></html>");
 Object.defineProperty(dom.document, "oninput", { configurable: true, value: null });
@@ -57,27 +58,6 @@ after(() => {
 	if (oldBlur) Object.defineProperty(proto, "blur", oldBlur);
 	else Reflect.deleteProperty(proto, "blur");
 });
-
-type TestOrg = NonNullable<ChatListResponse["organization"]>;
-
-const STAMP = "2026-01-01T00:00:00.000Z";
-
-function chat(id: string, overrides: Partial<ChatListItem> = {}): ChatListItem {
-	return {
-		id,
-		title: id,
-		kind: "teach",
-		createdAt: STAMP,
-		updatedAt: STAMP,
-		messageCount: 1,
-		phase: "probe",
-		pendingQuestion: false,
-		pendingProblem: false,
-		busy: false,
-		compacting: false,
-		...overrides,
-	};
-}
 
 const ORG: TestOrg = {
 	folders: [
@@ -176,6 +156,12 @@ async function blur(input: HTMLInputElement) {
 		input.blur();
 	});
 }
+
+it("the renamed folder has no header button while its sibling keeps one", async () => {
+	await mount();
+	assert.equal(document.querySelector('[data-sidebar-folder="alg"]'), null, "the renamed folder's header is gone");
+	assert.ok(document.querySelector('[data-sidebar-folder="maps"]'), "the sibling header is unchanged");
+});
 
 it("Enter commits the typed name exactly once — the blur it triggers cannot double-commit", async () => {
 	await mount();
