@@ -1,10 +1,11 @@
 "use client";
 
-import type { DOMAttributes, ReactNode } from "react";
+import { useEffect, useRef, useState, type DOMAttributes, type MouseEvent, type ReactNode } from "react";
 import { FolderIcon, FolderOpenIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { fuzzyScore } from "@/src/core";
 import type { ChatListItem, ChatListResponse } from "@/src/core";
+import { SourceDragRow } from "@/components/source-folder-tree";
 import {
 	currentChatFolder,
 	folderChain,
@@ -12,6 +13,7 @@ import {
 	type SidebarFolder,
 	type SidebarOrganization,
 } from "@/components/sidebar-folder-actions";
+import { useOptionalInteractionLayers } from "@/components/interaction-layers";
 
 export type SidebarTreeNode =
 	| { kind: "folder"; folder: SidebarFolder; expanded: boolean; children: SidebarTreeNode[] }
@@ -178,16 +180,85 @@ export function enterKbdChat(visibleChatIds: readonly string[], current: string 
 }
 
 /**
+ * The folder header's inline rename field: same commit rules as the
+ * session RenameRow — Enter blurs into the commit, Escape cancels, blur
+ * commits once (the finished guard makes Enter+blur and repeated blurs
+ * single writes).
+ */
+function FolderRenameInput({
+	folder,
+	depth,
+	onRename,
+	onCancel,
+}: {
+	folder: SidebarFolder;
+	depth: number;
+	onRename: (folderId: string, name: string) => void;
+	onCancel: () => void;
+}): ReactNode {
+	const [draft, setDraft] = useState(folder.name);
+	const inputRef = useRef<HTMLInputElement | null>(null);
+	const finished = useRef(false);
+	const interactions = useOptionalInteractionLayers();
+	useEffect(() => {
+		const el = inputRef.current;
+		if (el) {
+			el.focus();
+			el.select();
+		}
+	}, []);
+	const commit = () => {
+		if (finished.current) return;
+		finished.current = true;
+		onRename(folder.id, draft);
+	};
+	return (
+		<div className="py-1.5 pr-2" style={{ paddingLeft: 8 + depth * 12 + 20 }}>
+			<input
+				ref={inputRef}
+				type="text"
+				value={draft}
+				spellCheck={false}
+				data-testid="sidebar-folder-rename"
+				aria-label="Folder name"
+				onChange={(e) => setDraft(e.target.value)}
+				onBlur={commit}
+				onKeyDown={(e) => {
+					if (e.key === "Enter") e.currentTarget.blur();
+					if (e.key === "Escape") {
+						if (interactions && !interactions.isElementEligible(e.currentTarget)) return;
+						interactions?.claimEscape(e);
+						e.stopPropagation(); // discard, not also the sidebar/chat chains
+						finished.current = true;
+						onCancel();
+					}
+				}}
+				className="lh-input h-6 w-full min-w-0 rounded-sm border border-border bg-background px-1.5 text-xs text-foreground outline-none"
+			/>
+		</div>
+	);
+}
+
+/**
  * Renders the folder tree. Pure and SSR-safe: expansion arrives via the
  * view; folder rows are buttons named by the folder (aria-expanded), chat
  * rows render through the caller inside data-sidebar-chat wrappers.
- * drop turns each folder header into a drop target.
+ * folderDrag wraps each folder header in a SourceDragRow — the caller
+ * passes it only in the normal tree (never while searching or without an
+ * organization). renamingFolderId swaps that folder's header button for
+ * the inline rename input; onFolderContextMenu receives the header
+ * button's contextmenu event.
  */
 export function SidebarFolderTree({
 	view,
 	onToggleFolder,
 	renderChat,
 	drop,
+	folderDrag = false,
+	renamingFolderId = null,
+	onRenameFolder,
+	onCancelRenameFolder,
+	onFolderContextMenu,
 }: {
 	view: SidebarFolderView;
 	onToggleFolder: (folderId: string) => void;
@@ -200,6 +271,13 @@ export function SidebarFolderTree({
 		activeTarget: string | null | undefined;
 		targetProps: (target: string) => Partial<Pick<DOMAttributes<HTMLElement>, "onDragOver" | "onDragLeave" | "onDrop">>;
 	};
+	/** Folder headers are also drag SOURCES (kind "folder"). */
+	folderDrag?: boolean;
+	/** The folder whose header renders the inline rename input. */
+	renamingFolderId?: string | null;
+	onRenameFolder?: (folderId: string, name: string) => void;
+	onCancelRenameFolder?: () => void;
+	onFolderContextMenu?: (e: MouseEvent<HTMLButtonElement>, folder: SidebarFolder) => void;
 }): ReactNode {
 	const renderLevel = (nodes: readonly SidebarTreeNode[], depth: number): ReactNode =>
 		nodes.map((node) => {
@@ -211,28 +289,46 @@ export function SidebarFolderTree({
 				);
 			}
 			const { folder } = node;
+			const renaming = renamingFolderId === folder.id;
+			const header = renaming ? (
+				<FolderRenameInput
+					folder={folder}
+					depth={depth}
+					onRename={(id, name) => onRenameFolder?.(id, name)}
+					onCancel={() => onCancelRenameFolder?.()}
+				/>
+			) : (
+				<button
+					type="button"
+					data-sidebar-folder={folder.id}
+					aria-expanded={node.expanded}
+					onClick={() => onToggleFolder(folder.id)}
+					onContextMenu={onFolderContextMenu ? (e) => onFolderContextMenu(e, folder) : undefined}
+					{...(drop?.targetProps(folder.id) ?? {})}
+					data-drop-active={drop ? String(drop.activeTarget === folder.id) : undefined}
+					className={cn(
+						"flex w-full items-center gap-1.5 rounded-lg py-1.5 pr-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+						drop?.activeTarget === folder.id && "bg-accent/50",
+					)}
+					style={{ paddingLeft: 8 + depth * 12 }}
+				>
+					{node.expanded ? (
+						<FolderOpenIcon className="size-3.5 shrink-0" aria-hidden />
+					) : (
+						<FolderIcon className="size-3.5 shrink-0" aria-hidden />
+					)}
+					<span className="min-w-0 flex-1 truncate">{folder.name}</span>
+				</button>
+			);
 			return (
 				<div key={folder.id} data-testid={`sidebar-folder-${folder.id}`}>
-					<button
-						type="button"
-						data-sidebar-folder={folder.id}
-						aria-expanded={node.expanded}
-						onClick={() => onToggleFolder(folder.id)}
-						{...(drop?.targetProps(folder.id) ?? {})}
-						data-drop-active={drop ? String(drop.activeTarget === folder.id) : undefined}
-						className={cn(
-							"flex w-full items-center gap-1.5 rounded-lg py-1.5 pr-2 text-left text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-							drop?.activeTarget === folder.id && "bg-accent/50",
-						)}
-						style={{ paddingLeft: 8 + depth * 12 }}
-					>
-						{node.expanded ? (
-							<FolderOpenIcon className="size-3.5 shrink-0" aria-hidden />
-						) : (
-							<FolderIcon className="size-3.5 shrink-0" aria-hidden />
-						)}
-						<span className="min-w-0 flex-1 truncate">{folder.name}</span>
-					</button>
+					{folderDrag && !renaming ? (
+						<SourceDragRow kind="folder" id={folder.id} name={folder.name} enabled>
+							{header}
+						</SourceDragRow>
+					) : (
+						header
+					)}
 					{node.expanded && <div role="group">{renderLevel(node.children, depth + 1)}</div>}
 				</div>
 			);
