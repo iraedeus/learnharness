@@ -1,7 +1,7 @@
 "use client";
 
 import { useId, useMemo } from "react";
-import { derivedNodeStatus, derivePlanStatuses } from "@/src/core";
+import { derivedNodeStatus, derivePlanStatuses, displayedPlan, type SessionPlan } from "@/src/core";
 import {
 	PlanDiagram,
 	PlanLayoutProbe,
@@ -43,12 +43,12 @@ export function planExists(messages: readonly PopupMessage[]): boolean {
 	return !!tree && tree.nodes.length > 0;
 }
 
-export function PlanMarginalia({ messages }: { messages: readonly PopupMessage[] }) {
+export function PlanMarginalia({ messages, sessionPlan }: { messages: readonly PopupMessage[]; sessionPlan?: SessionPlan }) {
 	const markerId = useId().replace(/[^a-zA-Z0-9-]/g, "");
-	const tree = useMemo(() => latestTree(messages), [messages]);
+	const { graphId, tree } = useMemo(() => displayedPlan(sessionPlan ?? { tree: latestTree(messages) ?? undefined }), [messages, sessionPlan]);
 	const statuses = useMemo(
-		() => (tree ? derivePlanStatuses(tree, messages as Parameters<typeof derivePlanStatuses>[1]) : null),
-		[tree, messages],
+		() => (tree ? derivePlanStatuses(tree, messages as Parameters<typeof derivePlanStatuses>[1], graphId) : null),
+		[tree, messages, graphId],
 	);
 	const plan = usePlanLayout(tree);
 	const { appearance } = useAppearance();

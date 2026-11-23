@@ -59,14 +59,16 @@ import {
 	sideEntryPoints,
 	sideSegmentId,
 	textPartMessageId,
+	liveSessionPlan,
 	kbdEventForAction as kbdEventForChat,
 	type ChatInput,
 	type ChatSettings,
 	type LhMessage,
 	type ModelSlotName,
+	type SessionPlan,
 } from "@/src/core";
 import { PlanBlock, PlanPopup, latestTree } from "@/components/plan-block";
-import { PlanMarginalia, planExists } from "@/components/plan-window";
+import { PlanMarginalia } from "@/components/plan-window";
 import { MermaidOverlay, SessionMermaidContext, type SessionImage } from "@/components/session-overlay";
 import { AbortTurnDialog, type AbortMode } from "@/components/abort-turn-dialog";
 import { ArrowRightIcon, DumbbellIcon, MessageCircleQuestionIcon, WaypointsIcon } from "lucide-react";
@@ -268,6 +270,7 @@ export function Chat({
 	chatId,
 	title,
 	initialMessages,
+	initialPlan,
 	initialError,
 	initialPrompt,
 	initiallyInFlight,
@@ -278,6 +281,7 @@ export function Chat({
 	chatId: string;
 	title: string;
 	initialMessages: LhMessage[];
+	initialPlan?: SessionPlan;
 	/** Memory-only settlement notice supplied on reopening. */
 	initialError?: string;
 	/** The session kind (practice sessions, owner 2026-10-04): practice
@@ -1244,7 +1248,13 @@ export function Chat({
 	// element is always truthy; gating on the node alone mounted a phantom
 	// (invisible, clickable) button in the bottom-right whenever a question
 	// was pending with no plan yet (owner report, UI round 2026-10-01).
-	const hasPlan = useMemo(() => planExists(messages), [messages]);
+	const initialPlanResults = useMemo(() => new Set(initialPlan ? initialMessages.flatMap(message => message.role === "toolResult" ? [message.toolCallId] : []) : []), [initialMessages, initialPlan]);
+	const lessonPlan = useMemo(() => {
+		const plan = liveSessionPlan(initialPlan ?? {}, nativeMessages, initialPlanResults);
+		return plan.tree ? plan : { ...plan, tree: latestTree(messages) ?? undefined };
+	}, [initialPlan, initialPlanResults, nativeMessages, messages]);
+	const planTree = lessonPlan.tree;
+	const hasPlan = Boolean(planTree?.nodes.length);
 	// The coverage ring's refresh chain (extraction-UX redesign): bumped at
 	// turn settle — the moment this session's uncovered mass changes.
 	const [coverageTick, setCoverageTick] = useState(0);
@@ -1272,10 +1282,6 @@ export function Chat({
 	planOpenRef.current = planOpen;
 	const setupOpenRef = useRef(setupOpen);
 	setupOpenRef.current = setupOpen;
-	// The session's live plan (drives the top-bar chip; the marginalia
-	// derives its own from the same transcript).
-	const planTree = useMemo(() => latestTree(messages), [messages]);
-
 	// ── Session usage (wave-4 stats bar) ──
 	// The money channel: the record's turns log and read-time server Pi
 	// pricing projection. Seeded once on mount (the page doesn't carry turns),
@@ -2086,7 +2092,7 @@ export function Chat({
 					onSubmitThinking={submitThinking}
 					chatId={chatId}
 					onModelChange={recordSelectedModel}
-					plan={hasPlan ? <PlanMarginalia messages={messages} /> : undefined}
+					plan={hasPlan ? <PlanMarginalia messages={messages} sessionPlan={lessonPlan} /> : undefined}
 					onOpenPlan={() => setPlanOpen(true)}
 					requiresReveal={requiresReveal}
 					readingThinking={readingThinkingSeed.value}
@@ -2217,7 +2223,7 @@ export function Chat({
 						onClose={() => setFigureFocus(null)}
 					/>
 				)}
-				{planOpen && <PlanPopup messages={messages} onClose={() => setPlanOpen(false)} />}
+				{planOpen && <PlanPopup messages={messages} sessionPlan={lessonPlan} onClose={() => setPlanOpen(false)} />}
 				<SelectionToolbar viewport={transcriptElement} actions={selectionActions} />
 				{citationEdit && (
 					<CitationCommentPopover

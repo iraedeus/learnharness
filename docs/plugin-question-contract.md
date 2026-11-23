@@ -51,10 +51,10 @@ are admitted atomically from one per-turn contribution snapshot. Never invoke a 
 again to reconstruct authority.
 
 Native parameters are `{question: string, payload: Q}` for probe and
-`{type: "predict" | "check", nodeId: string, question: string, payload: Q}` for teach.
+`{type: "predict" | "check", nodeId: string, graphId?: string, question: string, payload: Q}` for teach.
 Common fields cannot collide with payload fields. `question` is non-whitespace
 learner-visible Markdown preserved as authored, providing a safe teaser/fallback.
-Teach node IDs must be applicable live plan nodes; existing predict/check pacing applies.
+Teach questions name a node in the active plan graph. Omitting `graphId` selects the root plan.
 
 Optional side-effect-free synchronous refinements receive immutable context:
 `validateQuestion({chatId,variant,contractVersion,input})` and

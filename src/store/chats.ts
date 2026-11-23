@@ -14,7 +14,8 @@ import { PATHS } from "../../config.ts";
 import { emit } from "../core/events.ts";
 import type { ChatStore } from "../core/ports.ts";
 import type { ChatRecord, ChatSettings, ChatSummary, ExtractionRunUsage, ImageSnapshot, PlanTree, SideChatThread, TurnUsage } from "../core/contracts.ts";
-import { CURRENT_CHAT_VERSION } from "../core/contracts.ts";
+import { CURRENT_CHAT_VERSION, ROOT_PLAN_GRAPH_ID } from "../core/contracts.ts";
+import { createTree, PlanTreeError, planGraphPath, planGraphTree } from "../core/plan-tree.ts";
 import type { LhMessage } from "../core/native-messages.ts";
 import { activeProblemOf, danglingQuestionOf } from "../core/native-messages.ts";
 import { phaseAt3Lh } from "../core/phases.ts";
@@ -86,7 +87,7 @@ function listChats(): ChatSummary[] {
 			.filter((f) => f.endsWith(".json"))
 			.map((f) => getChat(f.slice(0, -5)))
 			.filter((r): r is ChatRecord => r !== null)
-			.map(({ messages, tree, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary }) => {
+			.map(({ messages, tree, nestedPlanGraphs, activeGraphId, turns, extractions, imageSnapshots: _imageSnapshots, sideChats: _sideChats, ...summary }) => {
 				// Per-record isolation (Wave B): a record whose messages fail the
 				// projection (e.g. pre-Wave-B UIMessage-format scratch — the
 				// zero-back-compat wipe makes these "corrupt") must not blank the
@@ -129,12 +130,16 @@ function listChats(): ChatSummary[] {
 /** Persist the full native message list (the record IS the agent state —
  *  Wave B: replay is state.messages = record.messages). SILENT by the
  *  events law — see the SILENCE LAW comment at createChat. */
-function saveMessages(id: string, messages: LhMessage[]): void {
+function saveMessages(id: string, messages: LhMessage[], activeGraphId?: string): void {
 	const record = getChat(id);
 	if (!record) throw new Error(`Chat not found: ${id}`);
 	// Side-delivery watermarks are part of the appended native entries,
 	// so input + updates commit together without mutating thread history.
 	record.messages = messages;
+	if (activeGraphId !== undefined) {
+		record.activeGraphId = activeGraphId;
+		trimActivePlanPath(record);
+	}
 	record.updatedAt = new Date().toISOString();
 	writeChat(record);
 }
@@ -223,8 +228,47 @@ function saveTree(id: string, tree: PlanTree): void {
 	const record = getChat(id);
 	if (!record) throw new Error(`Chat not found: ${id}`);
 	record.tree = tree;
+	trimActivePlanPath(record);
 	// Deliberately does NOT bump updatedAt: tree mutations piggyback on the
 	// turn's saveMessages, and sidebar ordering shouldn't churn on tree edits.
+	writeChat(record);
+}
+
+function trimActivePlanPath(record: ChatRecord): void {
+	if (record.activeGraphId === undefined) return;
+	const graphId = planGraphPath(record).at(-1);
+	if (!graphId || graphId === ROOT_PLAN_GRAPH_ID) delete record.activeGraphId;
+	else record.activeGraphId = graphId;
+}
+
+function saveNestedPlanGraph(id: string, parentGraphId: string, parentNodeId: string, tree: PlanTree, activate = false): string {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	const parentTree = planGraphTree(record, parentGraphId);
+	if (planGraphPath(record, parentGraphId).at(-1) !== parentGraphId || !parentTree?.nodes.some(node => node.id === parentNodeId)) {
+		throw new PlanTreeError(`No reachable plan node "${parentNodeId}" in graph "${parentGraphId}".`);
+	}
+	const next = createTree(tree.nodes, tree.edges);
+	const graphs = record.nestedPlanGraphs ?? [];
+	const previous = graphs.find(graph => graph.parentGraphId === parentGraphId && graph.parentNodeId === parentNodeId);
+	const graph = previous
+		? { ...previous, tree: { ...next, version: previous.tree.version + 1 } }
+		: { id: crypto.randomUUID(), parentGraphId, parentNodeId, tree: next };
+	record.nestedPlanGraphs = previous ? graphs.map(entry => entry === previous ? graph : entry) : [...graphs, graph];
+	if (activate) record.activeGraphId = graph.id;
+	trimActivePlanPath(record);
+	writeChat(record);
+	return graph.id;
+}
+
+function saveActivePlanGraph(id: string, graphId: string): void {
+	const record = getChat(id);
+	if (!record) throw new Error(`Chat not found: ${id}`);
+	if (planGraphPath(record, graphId).at(-1) !== graphId) {
+		throw new PlanTreeError(`Plan graph "${graphId}" is not reachable from the root.`);
+	}
+	if (graphId === ROOT_PLAN_GRAPH_ID) delete record.activeGraphId;
+	else record.activeGraphId = graphId;
 	writeChat(record);
 }
 
@@ -250,6 +294,8 @@ export const chatStore: ChatStore = {
 	saveMessages,
 	saveImageSnapshot,
 	saveTree,
+	saveNestedPlanGraph,
+	saveActivePlanGraph,
 	saveSettings,
 	renameChat,
 	deleteChat,

@@ -46,6 +46,8 @@ import {
 	type LhMarkerMessage,
 } from "../core/index.ts";
 import { emit } from "../core/events.ts";
+import { projectPlanContext } from "../core/plan-context.ts";
+import { planGraphPath, planGraphTree } from "../core/plan-tree.ts";
 import type { ChatStore } from "../core/ports.ts";
 import type { PiEngine } from "../agent/models.ts";
 import { runSubagent } from "../agent/subagents/pi-run.ts";
@@ -171,9 +173,11 @@ export function effectiveThresholdTokens(settingTokens: number | undefined, cont
  *  prompt term the anchor would have covered. Supplying a model opts into
  *  reasoning-aware estimates; the service supplies it only when enabled. */
 export function projectedContextTokens(messages: readonly LhMessage[], systemPromptTokens: number, model?: PiEngine["model"]): number {
-	const est = estimateContextTokens(messages, model);
-	if (est.lastUsageIndex !== null) return est.tokens;
-	return estimateTokens(toLlmMessages(messages as readonly AgentMessage[]) as unknown as readonly LhMessage[], model) + systemPromptTokens;
+	const scoped = projectPlanContext(messages);
+	// Saved usage can refer to the request in a branch we have since left.
+	const est = scoped === messages ? estimateContextTokens(scoped, model) : null;
+	if (est && est.lastUsageIndex !== null) return est.tokens;
+	return estimateTokens(toLlmMessages(scoped as readonly AgentMessage[]) as unknown as readonly LhMessage[], model) + systemPromptTokens;
 }
 
 // ─── the compaction run ─────────────────────────────────────────────────────
@@ -191,9 +195,9 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	if (isTurnRunning(chatId)) return;
 	const record = deps.chatStore.getChat(chatId);
 	if (!record) return;
-	const messages = record.messages;
+	const messages = projectPlanContext(record.messages);
 	const model = deps.includeReasoning ? deps.engine.model : undefined;
-	const tokensBefore = projectedContextTokens(deps.projectMessages?.(record) ?? messages, deps.systemPromptTokens, model);
+	const tokensBefore = projectedContextTokens(deps.projectMessages?.(record) ?? record.messages, deps.systemPromptTokens, model);
 	if (tokensBefore <= deps.thresholdTokens) return; // settled beneath while we waited
 
 	const cut = compactionCutIndex(messages, undefined, model);
@@ -233,9 +237,10 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 	const spanText = serializeForSummary(summaryMessages);
 	const fullSpan = priorSummary ? `[SYSTEM NOTE — prior compaction summary, still authoritative where not superseded]\n${priorSummary}\n\n${spanText}` : spanText;
 
+	const graphId = planGraphPath(record).at(-1);
 	const prompt = buildCompactionPrompt({
 		spanText: fullSpan,
-		planTreeText: planTreeToText(record.tree, messages),
+		planTreeText: planTreeToText(graphId ? planGraphTree(record, graphId) : record.tree, record.messages, graphId),
 		kind: deps.kind,
 	});
 
@@ -259,7 +264,7 @@ async function compact(deps: CompactionDeps, chatId: string): Promise<void> {
 		// matches compacting first and acting after (#518).
 		const current = deps.chatStore.getChat(chatId);
 		if (!current) throw new Error(`Chat not found: ${chatId}`);
-		const end = messages.length;
+		const end = record.messages.length;
 		deps.chatStore.saveMessages(chatId, [...current.messages.slice(0, end), marker, ...current.messages.slice(end)]);
 		// The money channel: the summary is a real model call on the
 		// session's own engine — its usage keys to the marker (provenance:

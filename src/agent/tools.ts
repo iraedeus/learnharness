@@ -13,6 +13,7 @@ import {
 	quizInputProblems,
 } from "../core/question-core.ts";
 import { filterEnabledTools, type EnabledTools } from "../core/pending.ts";
+import { activePlanNodeProblem } from "../core/plan-tree.ts";
 import type { JobRecord } from "../core/contracts.ts";
 import type { JobStore } from "../core/ports.ts";
 import { jobTools, type DemoInput, type PdfInput, type ResearchInput, type VisualInput } from "./tools/jobs.ts";
@@ -215,6 +216,14 @@ export const probeQuizTool: AgentTool<typeof probeQuizInputSchema> = {
 	},
 };
 
+function teachQuestionResult(ctx: PlanToolContext, name: "quiz" | "explain", input: { nodeId: string; graphId?: string }, problems: string[]) {
+	const problem = activePlanNodeProblem(ctx.chatStore.getChat(ctx.chatId), input.nodeId, input.graphId);
+	if (problem) problems.push(problem.message);
+	if (problems.length === 0) return questionResult();
+	const result = invalidInputResult(name, problems);
+	return problem?.planGraphMismatch ? { ...result, details: { ...result.details, planGraphMismatch: true } } : result;
+}
+
 /** The teacher's free-recall variant (nodeId-validated, same seam as the
  *  teach quiz — phases/plan recognize BOTH tool names). */
 export function teachExplainToolFor(
@@ -227,13 +236,7 @@ export function teachExplainToolFor(
 		parameters: explainInputObject,
 		prepareArguments: prepareQuestionArguments,
 		executionMode: "sequential",
-		execute: async (_toolCallId, input) => {
-			const problems = [...explainInputProblems(input)];
-			const nodeIdProblemText = nodeIdProblem(ctx, input.nodeId);
-			if (nodeIdProblemText) problems.push(nodeIdProblemText);
-			if (problems.length > 0) return invalidInputResult("explain", problems);
-			return questionResult();
-		},
+		execute: async (_toolCallId, input) => teachQuestionResult(ctx, "explain", input, [...explainInputProblems(input)]),
 	};
 }
 
@@ -348,22 +351,6 @@ export function createProberTools(
 
 // ─── the teacher's question tools (quiz carries the position field) ──────────
 
-/** The nodeId-against-live-tree check the teacher's quiz chains after the
- *  shared authoring contract (the old superRefine, verbatim). */
-function nodeIdProblem(ctx: Pick<PlanToolContext, "chatId" | "chatStore">, nodeId: string): string | null {
-	const record = ctx.chatStore.getChat(ctx.chatId);
-	const known = record?.tree?.nodes.map((n) => n.id) ?? [];
-	if (!known.includes(nodeId)) {
-		return (
-			`nodeId "${nodeId}" matches no node in this session's plan map. ` +
-			(known.length > 0
-				? `Copy one of your plan_init slugs exactly (${known.slice(0, 5).join(", ")}${known.length > 5 ? ", …" : ""}).`
-				: "No plan map exists yet — call plan_init before posing quizzes.")
-		);
-	}
-	return null;
-}
-
 /** Build the teach-side quiz tool for one request (exported for tests): the authoring contract
  *  + the per-session plan-nodeId validation (both run in execute — the
  *  grading contract is untouched). Reads the LIVE chat record, so rewrites
@@ -379,13 +366,7 @@ export function teachQuizToolFor(ctx: Pick<PlanToolContext, "chatId" | "chatStor
 		parameters: quizInputObject,
 		prepareArguments: prepareQuestionArguments,
 		executionMode: "sequential",
-		execute: async (_toolCallId, input) => {
-			const problems = [...quizInputProblems(input)];
-			const nodeIdProblemText = nodeIdProblem(ctx, input.nodeId);
-			if (nodeIdProblemText) problems.push(nodeIdProblemText);
-			if (problems.length > 0) return invalidInputResult("quiz", problems);
-			return questionResult();
-		},
+		execute: async (_toolCallId, input) => teachQuestionResult(ctx, "quiz", input, [...quizInputProblems(input)]),
 	};
 }
 

@@ -9,8 +9,8 @@ import { validatePluginSubmissionImages, type PluginSubmissionImages } from "./p
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 export type PluginQuestionVariant = "probe" | "teach";
 export type PluginQuestionInput<Q = JsonValue> = { question: string; payload: Q } & (
-	| { type?: never; nodeId?: never }
-	| { type: "predict" | "check"; nodeId: string }
+	| { type?: never; nodeId?: never; graphId?: never }
+	| { type: "predict" | "check"; nodeId: string; graphId?: string }
 );
 export interface PluginQuestionValidationContext<Q = JsonValue> {
 	readonly chatId: string;
@@ -371,7 +371,11 @@ function buildParameters(schema: TSchema, variant: PluginQuestionVariant): TSche
 		type: "object", additionalProperties: false,
 		properties: {
 			question: { type: "string", pattern: "\\S" }, payload,
-			...(variant === "teach" ? { type: { type: "string", enum: ["predict", "check"] }, nodeId: { type: "string", pattern: "\\S" } } : {}),
+			...(variant === "teach" ? {
+				type: { type: "string", enum: ["predict", "check"] },
+				nodeId: { type: "string", pattern: "\\S" },
+				graphId: { type: "string", pattern: "\\S", description: "Id of the active plan graph. Omit it for the root plan." },
+			} : {}),
 		},
 		required: variant === "teach" ? ["type", "nodeId", "question", "payload"] : ["question", "payload"],
 	};

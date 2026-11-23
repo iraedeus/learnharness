@@ -12,8 +12,11 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { derivePlanStatuses, derivedNodeStatus, type PlanTree, type PlanToolResult } from "../src/core/contracts.ts";
-import { createTree, emptyTree, PlanTreeError } from "../src/core/plan-tree.ts";
+import { derivePlanStatuses, derivePlanStatusesLh, derivedNodeStatus, ROOT_PLAN_GRAPH_ID, type PlanTree, type PlanToolResult } from "../src/core/contracts.ts";
+import { createTree, emptyTree, planGraphPath, planGraphTree, PlanTreeError } from "../src/core/plan-tree.ts";
+import type { LhMessage } from "../src/core/native-messages.ts";
+import { projectView } from "../src/core/view.ts";
+import { teachExplainToolFor } from "../src/agent/tools.ts";
 import { planTools } from "../src/agent/tools/plan.ts";
 import { parseMermaidPlan } from "../src/agent/tools/mermaid-plan.ts";
 import { chatStore } from "../src/store/chats.ts";
@@ -110,6 +113,88 @@ function newChat(title: string): string {
 	return chat.id;
 }
 
+function teachCall(id: string, nodeId: string, graphId?: string): LhMessage {
+	return {
+		id, role: "assistant", api: "openai-completions", provider: "fixture", model: "fixture", timestamp: 1,
+		stopReason: "toolUse", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+		content: [{ type: "toolCall", id, name: "explain", arguments: { nodeId, ...(graphId === undefined ? {} : { graphId }) } }],
+	};
+}
+
+describe("nested lesson plans", () => {
+	it("reopens the active branch and scopes position to each graph", async () => {
+		const chatId = newChat("Networks");
+		chatStore.saveTree(chatId, tree(["transport", "intro"]));
+		const transport = chatStore.saveNestedPlanGraph(chatId, ROOT_PLAN_GRAPH_ID, "transport", tree(["tcp", "intro"]));
+		const tcp = chatStore.saveNestedPlanGraph(chatId, transport, "tcp", tree(["intro"]));
+		chatStore.saveActivePlanGraph(chatId, tcp);
+		const rejected = await teachExplainToolFor({ chatId, chatStore }).execute("wrong-graph", {
+			type: "check", nodeId: "transport", question: "What is the transport layer?", correctAnswer: "It provides end-to-end communication.",
+		});
+		assert.equal(rejected.isError, true);
+		chatStore.saveMessages(chatId, [
+			teachCall("root-intro", "intro"),
+			teachCall("transport-intro", "intro", transport),
+			teachCall("transport-tcp", "tcp", transport),
+			teachCall("tcp-intro", "intro", tcp),
+			teachCall("wrong-graph", "transport"),
+			{ ...rejected, id: "wrong-graph-result", role: "toolResult", toolCallId: "wrong-graph", toolName: "explain", timestamp: 2, isError: true },
+		]);
+
+		const reopened = chatStore.getChat(chatId)!;
+		assert.deepEqual(planGraphPath(reopened), [ROOT_PLAN_GRAPH_ID, transport, tcp]);
+		for (const [graphId, current, visited] of [[ROOT_PLAN_GRAPH_ID, "intro", []], [transport, "tcp", ["intro"]], [tcp, "intro", []]] as const) {
+			const graph = planGraphTree(reopened, graphId)!;
+			const expected = { current, visited: new Set(visited) };
+			assert.deepEqual(derivePlanStatusesLh(graph, reopened.messages, graphId), expected);
+			assert.deepEqual(derivePlanStatuses(graph, projectView(reopened.messages), graphId), expected);
+		}
+	});
+
+	it("preserves detached graphs and questions while shortening the active branch on a rewrite", async () => {
+		const chatId = newChat("Networks");
+		const tools = planTools({ chatId, chatStore });
+		await exec(tools, "plan_init", { mermaid: "graph TD\ntransport[Transport]" });
+		const transport = chatStore.saveNestedPlanGraph(chatId, ROOT_PLAN_GRAPH_ID, "transport", tree(["tcp", "udp"]));
+		const tcp = chatStore.saveNestedPlanGraph(chatId, transport, "tcp", tree(["handshake"]));
+		const question = teachCall("tcp-handshake", "handshake", tcp);
+		chatStore.saveMessages(chatId, [question]);
+		chatStore.saveActivePlanGraph(chatId, tcp);
+
+		assert.equal(chatStore.saveNestedPlanGraph(chatId, ROOT_PLAN_GRAPH_ID, "transport", tree(["udp"])), transport);
+		let reopened = chatStore.getChat(chatId)!;
+		assert.equal(reopened.activeGraphId, transport);
+		assert.deepEqual(planGraphPath(reopened), [ROOT_PLAN_GRAPH_ID, transport]);
+		assert.throws(() => chatStore.saveActivePlanGraph(chatId, tcp), /not reachable/);
+		assert.throws(() => chatStore.saveNestedPlanGraph(chatId, tcp, "handshake", tree(["syn"])), /No reachable plan node/);
+
+		assert.equal((await exec(tools, "plan_init", { mermaid: "graph TD\nlink[Link layer]" })).ok, true);
+		reopened = chatStore.getChat(chatId)!;
+		assert.equal(reopened.activeGraphId, undefined);
+		assert.deepEqual(planGraphPath(reopened), [ROOT_PLAN_GRAPH_ID]);
+		assert.deepEqual(reopened.messages, [question]);
+		assert.equal(derivePlanStatusesLh(planGraphTree(reopened, tcp)!, reopened.messages, tcp).current, "handshake");
+
+		await exec(tools, "plan_init", { mermaid: "graph TD\ntransport[Transport]" });
+		assert.equal(chatStore.saveNestedPlanGraph(chatId, ROOT_PLAN_GRAPH_ID, "transport", tree(["tcp"])), transport);
+		reopened = chatStore.getChat(chatId)!;
+		assert.deepEqual(planGraphPath(reopened, tcp), [ROOT_PLAN_GRAPH_ID, transport, tcp]);
+		assert.deepEqual(planGraphPath(reopened), [ROOT_PLAN_GRAPH_ID]);
+	});
+
+	it("reads an old session and its position without rewriting its file", () => {
+		const chatId = newChat("Old lesson");
+		const filename = path.join(PATHS.chats, `${chatId}.json`);
+		const { version, ...record } = chatStore.getChat(chatId)!;
+		const oldJson = JSON.stringify({ ...record, tree: tree(["intro"]), messages: [teachCall("old-question", "intro")] });
+		fs.writeFileSync(filename, oldJson);
+		const reopened = chatStore.getChat(chatId)!;
+		assert.deepEqual(planGraphPath(reopened), [ROOT_PLAN_GRAPH_ID]);
+		assert.equal(derivePlanStatusesLh(reopened.tree!, reopened.messages).current, "intro");
+		assert.equal(fs.readFileSync(filename, "utf8"), oldJson);
+	});
+});
+
 describe("plan_init — the author-once mermaid tool (execute against the real store)", () => {
 	it("parses a mermaid block, builds the tree, persists, returns the full tree", async () => {
 		const chatId = newChat("Plan: init");
@@ -186,9 +271,9 @@ describe("plan_init — the author-once mermaid tool (execute against the real s
 		assert.equal(res.tree, undefined, "no tree echo on failure (context diet, 2026-10-09)");
 	});
 
-	it("only plan_init exists — the seven mutation/tracking tools are gone by design", () => {
+	it("registers root authoring and branch transitions", () => {
 		const tools = planTools({ chatId: "chat_x", chatStore });
-		assert.deepEqual(Object.keys(tools), ["plan_init"]);
+		assert.deepEqual(Object.keys(tools), ["plan_init", "plan_enter", "plan_leave"]);
 	});
 
 	it("unknown chat returns ok:false with the empty tree", async () => {

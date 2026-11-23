@@ -17,8 +17,7 @@ import {
 	type LayoutNode,
 	type PlanLayout,
 } from "@/components/plan-layout";
-import type { PlanBlockData, PlanNodeStatus, PlanTree } from "@/src/core";
-import { derivedNodeStatus, derivePlanStatuses } from "@/src/core";
+import { derivedNodeStatus, derivePlanStatuses, displayedPlan, type PlanBlockData, type PlanNodeStatus, type PlanTree, type SessionPlan } from "@/src/core";
 import { Hint } from "@/components/ui/hint";
 import { useAppearance } from "@/components/settings/appearance";
 import { InteractionLayerOwner, useInteractionLayer } from "./interaction-layers";
@@ -589,11 +588,15 @@ const POPUP_PAD = GLOW_REACH;
  * territory. Surface 80% + blur (owner decision): the transcript ghosts
  * through while the focus owns the session area.
  */
-export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessage[]; onClose: () => void }) {
-	const tree = useMemo(() => latestTree(messages), [messages]);
+export function PlanPopup({ messages, sessionPlan, onClose }: { messages: readonly PopupMessage[]; sessionPlan?: SessionPlan; onClose: () => void }) {
+	const [pinnedGraphId, setPinnedGraphId] = useState<string | null>(null);
+	const { graphId, tree, breadcrumbs } = useMemo(
+		() => displayedPlan(sessionPlan ?? { tree: latestTree(messages) ?? undefined }, pinnedGraphId),
+		[messages, sessionPlan, pinnedGraphId],
+	);
 	const statuses = useMemo(
-		() => (tree ? derivePlanStatuses(tree, messages as Parameters<typeof derivePlanStatuses>[1]) : null),
-		[tree, messages],
+		() => (tree ? derivePlanStatuses(tree, messages as Parameters<typeof derivePlanStatuses>[1], graphId) : null),
+		[tree, messages, graphId],
 	);
 	const statusOf = (id: string): PlanNodeStatus => (statuses ? derivedNodeStatus(statuses, id) : "upcoming");
 
@@ -638,6 +641,7 @@ export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessa
 	useEffect(() => {
 		if (atFloor) userAdjustedRef.current = false;
 	}, [atFloor]);
+	useEffect(() => { userAdjustedRef.current = false; }, [graphId]);
 	useEffect(() => {
 		if (userAdjustedRef.current || !size.w || !size.h) return;
 		setView(fitGraphView(box, size, fitZoom));
@@ -647,7 +651,7 @@ export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessa
 		// seeing (round 4's gate wasn't enough; round 7 fix).
 		const raf = requestAnimationFrame(() => setSettled(true));
 		return () => cancelAnimationFrame(raf);
-	}, [fitZoom, size, box]);
+	}, [fitZoom, size, box, graphId]);
 
 	useEffect(() => {
 		const el = viewportRef.current;
@@ -714,6 +718,8 @@ export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessa
 		<div
 			ref={rootRef}
 			data-testid="plan-popup"
+			data-plan-graph={graphId}
+			data-current-node={statuses?.current ?? undefined}
 			// SESSION-SCOPED (absolute, not fixed): the chat page mounts this
 			// INSIDE the session-area div — below the drag bar, right of the
 			// sidebar. 80% + blur: the transcript ghosts through.
@@ -726,9 +732,21 @@ export function PlanPopup({ messages, onClose }: { messages: readonly PopupMessa
 				if (e.target === e.currentTarget) onClose();
 			}}
 		>
-			<div className="mb-2 flex items-center gap-2">
-				<span className="text-sm font-medium">The plan</span>
-				<span className="text-xs text-muted-foreground">live — statuses derive from your check outcomes</span>
+			<div className="mb-2 flex flex-wrap items-center gap-2">
+				<nav aria-label="Plan path" className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm">
+					{breadcrumbs.length === 0 && <span className="font-medium">The plan</span>}
+					{breadcrumbs.map(({ id, title }) => id === graphId ? (
+						<span key={id} aria-current="location" className="font-medium">{title}</span>
+					) : (
+						<span key={id} className="inline-flex items-center gap-1.5">
+							<button type="button" onClick={() => setPinnedGraphId(id)} className="rounded px-1 py-0.5 text-muted-foreground hover:bg-accent hover:text-foreground">{title}</button>
+							<span aria-hidden="true">›</span>
+						</span>
+					))}
+				</nav>
+				{pinnedGraphId !== null && (
+					<button type="button" onClick={() => setPinnedGraphId(null)} className="rounded-md border px-2 py-1 text-xs hover:bg-accent">Back to current step</button>
+				)}
 				<Hint label="Close" binding="escape" side="left">
 <button
 					type="button"

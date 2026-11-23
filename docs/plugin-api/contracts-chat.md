@@ -159,6 +159,8 @@ export interface ChatRecord {
     imageSnapshots?: Record<string, ImageSnapshot>;
     kind?: ChatKind;
     tree?: PlanTree;
+    nestedPlanGraphs?: NestedPlanGraph[];
+    activeGraphId?: string;
     turns?: TurnUsage[];
     extractions?: ExtractionRunUsage[];
     settings?: ChatSettings;
@@ -167,7 +169,7 @@ export interface ChatRecord {
 }
 ```
 
-**Related types:** [ChatKind](contracts-chat.md#chatkind), [ChatSettings](contracts-chat.md#chatsettings), [ExtractionRunUsage](contracts-chat.md#extractionrunusage), [ImageSnapshot](contracts-chat.md#imagesnapshot), [LhMessage](native-messages.md#lhmessage), [PlanTree](contracts-plan.md#plantree), [SideChatThread](contracts-chat.md#sidechatthread), [TurnUsage](contracts-chat.md#turnusage).
+**Related types:** [ChatKind](contracts-chat.md#chatkind), [ChatSettings](contracts-chat.md#chatsettings), [ExtractionRunUsage](contracts-chat.md#extractionrunusage), [ImageSnapshot](contracts-chat.md#imagesnapshot), [LhMessage](native-messages.md#lhmessage), [NestedPlanGraph](contracts-plan.md#nestedplangraph), [PlanTree](contracts-plan.md#plantree), [SideChatThread](contracts-chat.md#sidechatthread), [TurnUsage](contracts-chat.md#turnusage).
 
 **Member index** (including nested object members; inherited members are defined in the linked base types):
 
@@ -179,6 +181,8 @@ export interface ChatRecord {
 - [imageSnapshots](#chatrecord-imagesnapshots)
 - [kind](#chatrecord-kind)
 - [tree](#chatrecord-tree)
+- [nestedPlanGraphs](#chatrecord-nestedplangraphs)
+- [activeGraphId](#chatrecord-activegraphid)
 - [turns](#chatrecord-turns)
 - [extractions](#chatrecord-extractions)
 - [settings](#chatrecord-settings)
@@ -233,10 +237,24 @@ kind?: ChatKind;
 
 ### ChatRecord tree
 
-The session's plan tree, written by the native plan tools.
+The root plan tree, written by plan_init.
 
 ```ts
 tree?: PlanTree;
+```
+
+### ChatRecord nestedPlanGraphs
+
+```ts
+nestedPlanGraphs?: NestedPlanGraph[];
+```
+
+### ChatRecord activeGraphId
+
+Absent when the lesson is at the root.
+
+```ts
+activeGraphId?: string;
 ```
 
 ### ChatRecord turns

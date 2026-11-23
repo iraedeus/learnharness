@@ -8,7 +8,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { LhMessage } from "../native-messages.ts";
 import type { Phase3 } from "../phases.ts";
-import type { PlanNodeStatus, PlanTree } from "./plan.ts";
+import type { NestedPlanGraph, PlanNodeStatus, PlanTree } from "./plan.ts";
 import type { EmissionStats } from "./graph.ts";
 
 // ─── Chat records (the session store's on-disk format) ───────────────────────
@@ -31,8 +31,11 @@ export interface ChatRecord {
 	imageSnapshots?: Record<string, ImageSnapshot>;
 	/** The session's kind; an absent field reads as teach. */
 	kind?: ChatKind;
-	/** The session's plan tree, written by the native plan tools. */
+	/** The root plan tree, written by plan_init. */
 	tree?: PlanTree;
+	nestedPlanGraphs?: NestedPlanGraph[];
+	/** Absent when the lesson is at the root. */
+	activeGraphId?: string;
 	/** Append-only usage log, separate from message history: one entry per billed
 	 * turn, deduplicated by request identity. messageId associates usage with the
 	 * transcript; token/cost aggregates are computed from the log at read time. */

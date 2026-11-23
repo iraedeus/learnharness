@@ -10,11 +10,11 @@ import { derivePlanStatuses, derivePlanStatusesLh } from "../src/core/contracts/
 import { sessionMarkdown } from "../src/core/session-markdown.ts";
 import type { PluginQuestionSnapshot, PluginQuestionAnswer, PluginQuestionOccurrence, JsonValue } from "../src/core/plugin-questions.ts";
 
-function assistant(id = "pose", callId = "call_0", teach = false): LhMessage & { role: "assistant" } {
+function assistant(id = "pose", callId = "call_0", teach = false, graphId?: string): LhMessage & { role: "assistant" } {
 	const snapshot: PluginQuestionSnapshot = {
 		protocolVersion: 1, pluginId: "fixture", typeId: "code", label: "Code question", variant: teach ? "teach" : "probe",
 		questionId: `question-${id}`, occurrence: { messageId: id, contentIndex: 1, toolCallId: callId, toolName: "old_plugin_name" }, contractVersion: 1,
-		input: teach ? { question: "Write a value.\n", payload: { privateReference: "PRIVATE-PAYLOAD" }, type: "check", nodeId: "n1" } : { question: "Write a value.\n", payload: { privateReference: "PRIVATE-PAYLOAD" } },
+		input: teach ? { question: "Write a value.\n", payload: { privateReference: "PRIVATE-PAYLOAD" }, type: "check", nodeId: "n1", ...(graphId === undefined ? {} : { graphId }) } : { question: "Write a value.\n", payload: { privateReference: "PRIVATE-PAYLOAD" } },
 		questionSchema: { type: "object", properties: { privateReference: { type: "string" } }, required: ["privateReference"], additionalProperties: false },
 		answerSchema: { anyOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }, { type: "array", items: { type: "string" } }] },
 		showThinking: true, requiresAnswerRefinement: false,
@@ -198,6 +198,16 @@ test("metadata-based teach phase and node positioning ignore failed attempts and
 	assert.equal(phaseAt3(projectView(messages)), "plan");
 	assert.equal(derivePlanStatusesLh(tree, messages).current, null);
 	assert.equal(derivePlanStatuses(tree, projectView(messages)).current, null);
+});
+
+test("a saved plugin question positions its own graph", () => {
+	const messages = [assistant("teach", "call", true, "nested")];
+	const tree = { version: 1, nodes: [{ id: "n1", title: "Node 1" }], edges: [] };
+	const view = projectView(messages);
+	assert.equal(derivePlanStatusesLh(tree, messages).current, null);
+	assert.equal(derivePlanStatuses(tree, view).current, null);
+	assert.equal(derivePlanStatusesLh(tree, messages, "nested").current, "n1");
+	assert.equal(derivePlanStatuses(tree, view, "nested").current, "n1");
 });
 
 test("session Markdown preserves historical string content alongside plugin questions", () => {

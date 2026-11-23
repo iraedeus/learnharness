@@ -1,9 +1,9 @@
 import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { serverExecute } from "../tool-execute.ts";
-import type { PlanToolResult, PlanTree } from "../../core/contracts.ts";
+import { ROOT_PLAN_GRAPH_ID, type PlanTransition } from "../../core/contracts/plan.ts";
 import type { ChatStore } from "../../core/ports.ts";
-import { createTree, PlanTreeError } from "../../core/plan-tree.ts";
+import { createTree, planGraphPath, planGraphTree, PlanTreeError } from "../../core/plan-tree.ts";
 import { parseMermaidPlan } from "./mermaid-plan.ts";
 
 /** The binding-id reminder riding plan_init's slim content (owner,
@@ -19,6 +19,33 @@ export interface PlanToolContext {
 	chatId: string;
 	/** The storage port plan tools persist through. */
 	chatStore: ChatStore;
+}
+
+/** A branch switch is visible to tools in this turn and commits with the
+ * transcript in persistTurn. New graphs may be safely reused after an abort. */
+export function planToolTurnStore(store: ChatStore): ChatStore {
+	let activeGraphId: string | undefined;
+	return {
+		...store,
+		getChat(id) {
+			const record = store.getChat(id);
+			return record && activeGraphId !== undefined
+				? { ...record, activeGraphId: planGraphPath(record, activeGraphId).at(-1) }
+				: record;
+		},
+		saveTree(id, tree) {
+			store.saveTree(id, tree);
+			if (activeGraphId === undefined) return;
+			const record = store.getChat(id);
+			if (record) activeGraphId = planGraphPath(record, activeGraphId).at(-1) ?? ROOT_PLAN_GRAPH_ID;
+		},
+		saveNestedPlanGraph(id, parentGraphId, parentNodeId, tree, activate) {
+			const graphId = store.saveNestedPlanGraph(id, parentGraphId, parentNodeId, tree);
+			if (activate) activeGraphId = graphId;
+			return graphId;
+		},
+		saveActivePlanGraph(_id, graphId) { activeGraphId = graphId; },
+	};
 }
 
 /**
@@ -59,7 +86,28 @@ const planInitInput = Type.Object({
 	}),
 });
 
+const planEnterInput = Type.Object({
+	nodeId: Type.String({ minLength: 1, description: "Node id in the active graph." }),
+	goal: Type.String({ minLength: 1, maxLength: 600, description: "What the learner should be able to do after this branch." }),
+	context: Type.String({ minLength: 1, maxLength: 3000, description: "Relevant learner goal, prerequisites, and established facts needed inside this branch." }),
+	mermaid: Type.Optional(planInitInput.properties.mermaid),
+});
+
+const planLeaveInput = Type.Object({
+	summary: Type.String({ minLength: 1, maxLength: 2000, description: "What the learner established, what is still uncertain, and any implications for the parent lesson." }),
+});
+
+function transitionResult(transition: PlanTransition) {
+	return {
+		text: transition.kind === "enter"
+			? `Entered ${transition.topic}. Active graph id: ${transition.graph.id}.`
+			: `Returned to plan graph ${transition.parentGraphId}. Result for ${transition.topic}: ${transition.summary}`,
+		details: { ok: true, transition },
+	};
+}
+
 export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> {
+	const { chatId, chatStore } = ctx;
 	return {
 		plan_init: {
 			name: "plan_init",
@@ -72,7 +120,6 @@ export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> 
 				"Every check you fire names the node it assesses via `nodeId`; where the lesson stands derives from those tags.",
 			parameters: planInitInput,
 			execute: serverExecute("plan_init", planInitInput, async ({ mermaid }) => {
-				const { chatId, chatStore } = ctx;
 				const record = chatStore.getChat(chatId);
 				if (!record) return { ok: false, error: `Chat not found: ${chatId}` };
 
@@ -88,6 +135,8 @@ export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> 
 					// edge endpoints, self-loops, cycles → PlanTreeError).
 					const next = createTree(parsed.plan.nodes, parsed.plan.edges);
 					chatStore.saveTree(chatId, next);
+					const activeGraphId = record.nestedPlanGraphs?.length
+						? planGraphPath({ ...record, tree: next }).at(-1) : undefined;
 					// Context diet: content = the validated nodeIds + the reminder (the
 				// ids just became binding for every quiz/explain call); details =
 					// the full tree for the record/UI — the plan popup's latestTree
@@ -96,14 +145,61 @@ export function planTools(ctx: PlanToolContext): Record<string, AgentTool<any>> 
 						text: JSON.stringify({
 							ok: true,
 							nodeIds: next.nodes.map((n) => n.id),
-							reminder: PLAN_NODE_IDS_REMINDER,
+							reminder: activeGraphId && activeGraphId !== ROOT_PLAN_GRAPH_ID
+								? `These node ids are for the root plan. Continue asking questions in the active graph ${activeGraphId}.`
+								: PLAN_NODE_IDS_REMINDER,
 						}),
-						details: { ok: true, tree: next },
+						details: { ok: true, tree: next, ...(activeGraphId ? { activeGraphId } : {}) },
 					};
 				} catch (err) {
 					if (err instanceof PlanTreeError) return { ok: false, error: err.message };
 					throw err;
 				}
+			}),
+		},
+		plan_enter: {
+			name: "plan_enter", label: "plan_enter", executionMode: "sequential",
+			description: "Enter the child graph of a topic in the active plan. Supply Mermaid to create a new child graph, and omit Mermaid to reopen it. Call on its own before teaching inside the branch.",
+			parameters: planEnterInput,
+			execute: serverExecute("plan_enter", planEnterInput, ({ nodeId, goal, context, mermaid }) => {
+				const record = chatStore.getChat(chatId);
+				if (!record) return { ok: false, error: `Chat not found: ${chatId}` };
+				const parentGraphId = planGraphPath(record).at(-1);
+				const node = parentGraphId && planGraphTree(record, parentGraphId)?.nodes.find(entry => entry.id === nodeId);
+				if (!parentGraphId || !node) return { ok: false, error: `Use a node in the active plan graph: ${nodeId}.` };
+				if (!goal.trim() || !context.trim()) return { ok: false, error: "Provide a goal and the relevant context for this branch." };
+				const existing = record.nestedPlanGraphs?.find(graph => graph.parentGraphId === parentGraphId && graph.parentNodeId === nodeId);
+				if (existing) {
+					chatStore.saveActivePlanGraph(chatId, existing.id);
+					return transitionResult({ kind: "enter", graph: existing, topic: node.title, goal: goal.trim(), context: context.trim() });
+				}
+				if (!mermaid) return { ok: false, error: "Provide Mermaid for the new child graph." };
+				const parsed = parseMermaidPlan(mermaid);
+				if (!parsed.ok || !parsed.plan) return { ok: false, error: parsed.problems.join("\n") };
+				try {
+					const tree = createTree(parsed.plan.nodes, parsed.plan.edges);
+					const id = chatStore.saveNestedPlanGraph(chatId, parentGraphId, nodeId, tree, true);
+					return transitionResult({ kind: "enter", graph: { id, parentGraphId, parentNodeId: nodeId, tree }, topic: node.title, goal: goal.trim(), context: context.trim() });
+				} catch (error) {
+					if (error instanceof PlanTreeError) return { ok: false, error: error.message };
+					throw error;
+				}
+			}),
+		},
+		plan_leave: {
+			name: "plan_leave", label: "plan_leave", executionMode: "sequential",
+			description: "Return to the parent plan after teaching a branch. Give a concise summary of what was established. Call on its own before continuing the parent lesson.",
+			parameters: planLeaveInput,
+			execute: serverExecute("plan_leave", planLeaveInput, ({ summary }) => {
+				const record = chatStore.getChat(chatId);
+				if (!record) return { ok: false, error: `Chat not found: ${chatId}` };
+				const path = planGraphPath(record);
+				const graph = record.nestedPlanGraphs?.find(entry => entry.id === path.at(-1));
+				if (!graph) return { ok: false, error: "The root plan has no parent graph." };
+				if (!summary.trim()) return { ok: false, error: "Summarize the branch before returning to its parent." };
+				const topic = planGraphTree(record, graph.parentGraphId)?.nodes.find(node => node.id === graph.parentNodeId)?.title ?? graph.parentNodeId;
+				chatStore.saveActivePlanGraph(chatId, graph.parentGraphId);
+				return transitionResult({ kind: "leave", graphId: graph.id, parentGraphId: graph.parentGraphId, topic, summary: summary.trim() });
 			}),
 		},
 	};

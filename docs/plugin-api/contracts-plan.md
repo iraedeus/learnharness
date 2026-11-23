@@ -4,9 +4,56 @@
 
 [API index](README.md) · [Data access and host boundaries](../plugin-authoring.md#backend-and-data)
 
+- [NestedPlanGraph](#nestedplangraph) — supporting declaration
 - [PlanEdge](#planedge) — supporting declaration
 - [PlanNode](#plannode) — supporting declaration
 - [PlanTree](#plantree) — supporting declaration
+
+## NestedPlanGraph
+
+Supporting declaration used by a public type. This is not an additional runtime API or SDK helper.
+
+```ts
+export interface NestedPlanGraph {
+    id: string;
+    parentGraphId: string;
+    parentNodeId: string;
+    tree: PlanTree;
+}
+```
+
+**Related types:** [PlanTree](contracts-plan.md#plantree).
+
+**Member index** (including nested object members; inherited members are defined in the linked base types):
+
+- [id](#nestedplangraph-id)
+- [parentGraphId](#nestedplangraph-parentgraphid)
+- [parentNodeId](#nestedplangraph-parentnodeid)
+- [tree](#nestedplangraph-tree)
+
+### NestedPlanGraph id
+
+```ts
+id: string;
+```
+
+### NestedPlanGraph parentGraphId
+
+```ts
+parentGraphId: string;
+```
+
+### NestedPlanGraph parentNodeId
+
+```ts
+parentNodeId: string;
+```
+
+### NestedPlanGraph tree
+
+```ts
+tree: PlanTree;
+```
 
 ## PlanEdge
 

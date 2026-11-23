@@ -33,6 +33,15 @@ export interface PlanTree {
 	version: number;
 }
 
+export const ROOT_PLAN_GRAPH_ID = "root";
+
+export interface NestedPlanGraph {
+	id: string;
+	parentGraphId: string;
+	parentNodeId: string;
+	tree: PlanTree;
+}
+
 // NOTE (2026-09-11 pivot, docs/archive/probe-teach-split.md): the tree once carried
 // `currentNodeId` / `doneNodeIds` — progress fields. They are GONE by
 // design: the tree carries structure ONLY; position and visited-ness derive
@@ -57,12 +66,14 @@ export type PlanNodeStatus = "current" | "visited" | "upcoming";
 // feed nothing; there is NO fallback current (before the first tagged check
 // nothing is current). Untagged checks no longer exist (nodeId is required
 // on the teach quiz, owner ruling 2026-09-26). NodeIds missing from the
-// current tree are ignored (a rewrite may have dropped the node).
+// current tree are ignored (a rewrite may have dropped the node). A tag
+// without graphId belongs to the root, including on historical calls. Calls
+// rejected for naming a different graph do not position either graph.
 
 /** Minimal structural message slice — anything with typed parts (mirrors
  * phases.ts: pure, no runtime deps, safe on server, client, and in tests). */
 interface PartsCarrier {
-	parts: Array<{ type: string; state?: string; input?: unknown; output?: unknown; pluginQuestion?: unknown }>;
+	parts: Array<{ type: string; state?: string; input?: unknown; output?: unknown; pluginQuestion?: unknown; result?: { isError?: boolean; details?: unknown } }>;
 }
 
 export interface DerivedPlanStatuses {
@@ -79,7 +90,17 @@ export function derivedNodeStatus(statuses: DerivedPlanStatuses, nodeId: string)
 	return "upcoming";
 }
 
-export function derivePlanStatuses(tree: PlanTree, messages: readonly PartsCarrier[]): DerivedPlanStatuses {
+function nodeIdInGraph(input: unknown, graphId: string): string | undefined {
+	const tag = input as { graphId?: unknown; nodeId?: unknown } | undefined;
+	const taggedGraph = tag?.graphId === undefined ? ROOT_PLAN_GRAPH_ID : tag.graphId;
+	return taggedGraph === graphId && typeof tag?.nodeId === "string" ? tag.nodeId : undefined;
+}
+
+function rejectedPlanGraph(result?: { isError?: boolean; details?: unknown }): boolean {
+	return result?.isError === true && (result.details as { planGraphMismatch?: unknown } | undefined)?.planGraphMismatch === true;
+}
+
+export function derivePlanStatuses(tree: PlanTree, messages: readonly PartsCarrier[], graphId = ROOT_PLAN_GRAPH_ID): DerivedPlanStatuses {
 	const ids = new Set(tree.nodes.map((n) => n.id));
 	const runs: string[] = []; // distinct tagged nodes in call order, CONSECUTIVE
 	// duplicates collapsed (several checks on one node = one stay on it)
@@ -89,8 +110,9 @@ export function derivePlanStatuses(tree: PlanTree, messages: readonly PartsCarri
 			// is a settings switch; the fold recognizes both (owner 2026-09-27).
 			const snapshot = posedPluginQuestionOfPart(part);
 			if (part.pluginQuestion !== undefined ? snapshot?.variant !== "teach" : part.type !== "tool-quiz" && part.type !== "tool-explain") continue;
-			const nodeId = ((snapshot?.input ?? part.input) as { nodeId?: unknown } | undefined)?.nodeId;
-			if (typeof nodeId !== "string" || !ids.has(nodeId)) continue; // untagged/unknown — moves nothing
+			if (rejectedPlanGraph(part.result)) continue;
+			const nodeId = nodeIdInGraph(snapshot?.input ?? part.input, graphId);
+			if (nodeId === undefined || !ids.has(nodeId)) continue;
 			if (runs.at(-1) !== nodeId) runs.push(nodeId);
 		}
 	}
@@ -102,16 +124,8 @@ export function derivePlanStatuses(tree: PlanTree, messages: readonly PartsCarri
 	return { current, visited };
 }
 
-/**
- * The plan tool result (author-once protocol, 2026-09-03): ONE server-side
- * tool, plan_init (tools/plan.ts) — a mermaid `graph TD` block canonicalized
- * into the structured tree, called once at the probe→teach seam and
- * re-callable to rewrite. The former mutation/tracking tools are gone:
- * statuses derive from check outcomes (derivePlanStatuses above), so the
- * tree carries structure, never progress. The tree panel still derives its
- * display from the LATEST plan tool output in the transcript — plus the
- * derived statuses — with no separate state channel.
- */
+/** The root-plan snapshot emitted by plan_init. Question calls supply the
+ * position within each graph, and plan transitions select the active graph. */
 export interface PlanToolResult {
 	ok: boolean;
 	error?: string;
@@ -121,6 +135,26 @@ export interface PlanToolResult {
 	 *  nodeIds + reminder; failures carry just the error. The plan
 	 *  popup's latestTree seam reads this field. */
 	tree?: PlanTree;
+	activeGraphId?: string;
+}
+
+export const PLAN_TRANSITION_TOOLS = ["plan_enter", "plan_leave"] as const;
+
+export type PlanTransition =
+	| { kind: "enter"; graph: NestedPlanGraph; topic: string; goal: string; context: string }
+	| { kind: "leave"; graphId: string; parentGraphId: string; topic: string; summary: string };
+
+export function readPlanTransition(details: unknown): PlanTransition | undefined {
+	const result = details as { ok?: boolean; transition?: PlanTransition } | undefined;
+	if (result?.ok !== true) return undefined;
+	const transition = result.transition;
+	if (transition?.kind === "enter" && typeof transition.graph?.id === "string" &&
+		typeof transition.graph.parentGraphId === "string" && typeof transition.graph.parentNodeId === "string" &&
+		Array.isArray(transition.graph.tree?.nodes) && Array.isArray(transition.graph.tree?.edges) &&
+		typeof transition.topic === "string" && typeof transition.goal === "string" && typeof transition.context === "string") return transition;
+	if (transition?.kind === "leave" && typeof transition.graphId === "string" && typeof transition.parentGraphId === "string" &&
+		typeof transition.topic === "string" && typeof transition.summary === "string") return transition;
+	return undefined;
 }
 
 
@@ -132,20 +166,21 @@ import { readPluginQuestionMessageAnnotation } from "../plugin-questions.ts";
 
 /** The same derivation over the NATIVE record: quiz CALLS only (any state —
  *  a dangling call still moves position; results feed nothing). */
-export function derivePlanStatusesLh(tree: PlanTree, messages: readonly LhMessage[]): DerivedPlanStatuses {
+export function derivePlanStatusesLh(tree: PlanTree, messages: readonly LhMessage[], graphId = ROOT_PLAN_GRAPH_ID): DerivedPlanStatuses {
 	const ids = new Set(tree.nodes.map((n) => n.id));
+	const rejected = new Set(messages.flatMap(message => message.role === "toolResult" && rejectedPlanGraph(message) ? [message.toolCallId] : []));
 	const runs: string[] = [];
 	for (const m of messages) {
 		if ((m as { role?: string }).role !== "assistant") continue;
 		const content = (m as { content?: unknown }).content;
 		if (!Array.isArray(content)) continue;
-		for (const [contentIndex, block] of (content as Array<{ type?: string; name?: string; arguments?: unknown }>).entries()) {
+		for (const [contentIndex, block] of (content as Array<{ type?: string; name?: string; id: string; arguments?: unknown }>).entries()) {
 			const annotation = readPluginQuestionMessageAnnotation(m, contentIndex);
-			if (block.type !== "toolCall") continue;
+			if (block.type !== "toolCall" || rejected.has(block.id)) continue;
 			if (annotation.status !== "absent" ? annotation.status !== "posed" || annotation.snapshot.variant !== "teach" : block.name !== "quiz" && block.name !== "explain") continue;
 			const input = annotation.status === "posed" ? annotation.snapshot.input : block.arguments;
-			const nodeId = (input as { nodeId?: unknown } | undefined)?.nodeId;
-			if (typeof nodeId !== "string" || !ids.has(nodeId)) continue;
+			const nodeId = nodeIdInGraph(input, graphId);
+			if (nodeId === undefined || !ids.has(nodeId)) continue;
 			if (runs.at(-1) !== nodeId) runs.push(nodeId);
 		}
 	}

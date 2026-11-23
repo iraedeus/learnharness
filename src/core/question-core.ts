@@ -253,17 +253,22 @@ const predictCheckType = Type.Union([Type.Literal("predict"), Type.Literal("chec
  *  calls BECAUSE they trailed every content field — fields generated
  *  first get dropped least. The order is also the authoring order:
  *  commit to the node and the question's role, then write the question. */
+const questionGraphId = Type.Optional(Type.String({
+	minLength: 1,
+	description: "Id of the active plan graph. Omit it for the root plan.",
+}));
+
 export const quizInputObject = Type.Object({
 	type: predictCheckType,
 	nodeId: Type.String({
 		description:
-			"REQUIRED plan-tree node id this question is about — must EXACTLY match one of this session's " +
-			"plan_init node slugs (validated at call time; a mismatched id is rejected back to you). " +
+			"REQUIRED plan-tree node id this question is about — copy a slug from the active graph exactly. " +
 			"The lesson's position on the map derives from these tags (the node the latest tagged question is about is " +
 			"where the map stands; earlier ones count as visited). A node takes as many questions as it deserves: stay on " +
 			"one node for as many turns as the understanding needs — one reasoning step at a time, never rush forward. " +
 			"For off-map checks use ask_user_question.",
 	}),
+	graphId: questionGraphId,
 	...quizInputBase.properties,
 });
 
@@ -326,13 +331,13 @@ export const explainInputObject = Type.Object({
 	type: predictCheckType,
 	nodeId: Type.String({
 		description:
-			"REQUIRED plan-tree node id this question is about — must EXACTLY match one of this session's " +
-			"plan_init node slugs (validated at call time; a mismatched id is rejected back to you). " +
+			"REQUIRED plan-tree node id this question is about — copy a slug from the active graph exactly. " +
 			"The lesson's position on the map derives from these tags (the node the latest tagged question is about is " +
 			"where the map stands; earlier ones count as visited). A node takes as many questions as it deserves: stay on " +
 			"one node for as many turns as the understanding needs — one reasoning step at a time, never rush forward. " +
 			"For off-map checks use ask_user_question.",
 	}),
+	graphId: questionGraphId,
 	...explainInputBase.properties,
 });
 

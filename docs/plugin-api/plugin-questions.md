@@ -677,9 +677,11 @@ export type PluginQuestionInput<Q = JsonValue> = {
 } & ({
     type?: never;
     nodeId?: never;
+    graphId?: never;
 } | {
     type: "predict" | "check";
     nodeId: string;
+    graphId?: string;
 });
 ```
 
@@ -691,6 +693,7 @@ export type PluginQuestionInput<Q = JsonValue> = {
 - [payload](#pluginquestioninput-payload)
 - [type](#pluginquestioninput-type) — 2 signatures/variants
 - [nodeId](#pluginquestioninput-nodeid) — 2 signatures/variants
+- [graphId](#pluginquestioninput-graphid) — 2 signatures/variants
 
 ### PluginQuestionInput question
 
@@ -722,6 +725,16 @@ nodeId?: never;
 
 ```ts
 nodeId: string;
+```
+
+### PluginQuestionInput graphId
+
+```ts
+graphId?: never;
+```
+
+```ts
+graphId?: string;
 ```
 
 ## PluginQuestionMountContext

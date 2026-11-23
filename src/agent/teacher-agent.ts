@@ -21,6 +21,10 @@ import { sendToUserApplies, sendToUserTool } from "./tools/send-to-user.ts";
 import { makeNarrationGuard, narrationGuardApplies, SEND_TO_USER_DELIVERY_RULE } from "./narration-guard.ts";
 import { createReadTool, readTool } from "./tools/read.ts";
 import { quizInputObject, quizInputProblems } from "../core/question-core.ts";
+import { activePlanNodeProblem } from "../core/plan-tree.ts";
+import { PLAN_TRANSITION_TOOLS } from "../core/contracts/plan.ts";
+import { projectPlanContext } from "../core/plan-context.ts";
+import { planToolTurnStore } from "./tools/plan.ts";
 import { QUESTION_TOOLS, TOGGLEABLE_TOOLS, type EnabledTools } from "../core/pending.ts";
 import type { PluginToolContext } from "../core/plugins.ts";
 import { toLlmMessages, nativeInputCause, PRACTICE_PROBLEM_TOOL } from "../core/native-messages.ts";
@@ -60,7 +64,7 @@ export type AgentKind = "prober" | "teacher" | "practice";
  * New builtin names must join this catalog; actual turn tools are reserved too. */
 export const CONVERSATION_TOOL_NAMES = Object.freeze([
 	...QUESTION_TOOLS, ...TOGGLEABLE_TOOLS, "probe_done", "read", "ls", "find", "grep",
-	"plan_init", "list_sessions", "list_propositions", "problem", "conclude", sendToUserTool.name,
+	"plan_init", ...PLAN_TRANSITION_TOOLS, "list_sessions", "list_propositions", "problem", "conclude", sendToUserTool.name,
 ] as const);
 
 // P2 (2026-09-19): segment discovery + override resolution live in ONE
@@ -201,7 +205,7 @@ function makeQuestionStopper(kind: AgentKind) {
 	};
 }
 
-function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: AgentTool<any, any>[], nodeExists?: (nodeId: string) => boolean,
+function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: AgentTool<any, any>[], nodeExists?: (nodeId: string, graphId?: string) => boolean,
 	practice?: { gate: PracticeGate; graphNodes: PracticeToolContext["graphNodes"] }) {
 	// Practice never reaches the role fallback (the handler ALWAYS injects
 	// the session's conversation engine — practice rides the same
@@ -211,6 +215,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 	const stopper = makeQuestionStopper(kind);
 	const narrationGuard = narrationGuardApplies(kind, engine.model, opts.tools !== undefined);
 	const narrationHooks = narrationGuard ? makeNarrationGuard() : undefined;
+	const hasPlanTransitions = kind === "teacher" && tools.some(tool => PLAN_TRANSITION_TOOLS.some(name => name === tool.name));
 	const composedPrompt = opts.promptSwitches
 		? composeInstructions(kind, opts.promptSwitches)
 		: composedInstructions[kind]!;
@@ -255,9 +260,15 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 		...(providerEvents ? { onProviderStreamEvent: providerEvents } : {}),
 		// Both policies share the SDK hook: preserve delivered-prose tracking
 		// and exact plugin occurrence binding rather than overwriting either.
-		...(questionLedger || narrationHooks ? {
+		...(questionLedger || narrationHooks || hasPlanTransitions ? {
 			...narrationHooks,
 			beforeToolCall: async (context: import("@earendil-works/pi-agent-core").BeforeToolCallContext) => {
+				if (hasPlanTransitions) {
+					const calls = context.assistantMessage.content.filter(block => block.type === "toolCall");
+					if (calls.length > 1 && calls.some(call => PLAN_TRANSITION_TOOLS.some(name => name === call.name))) {
+						return { block: true, reason: "Call plan_enter or plan_leave on its own, then continue in the resulting graph." };
+					}
+				}
 				const guarded = await narrationHooks?.beforeToolCall?.(context);
 				if (guarded?.block) return guarded;
 				questionLedger?.validatedCall(context);
@@ -284,7 +295,7 @@ function baseAgentOptions(kind: AgentKind, opts: AgentBuildOptions, tools: Agent
 		// UI-only markers (plan-block) drop, the app's id fields strip, and
 		// an abort's dangling question call gets its INTERRUPTED result. It
 		// must never throw (pi's convertToLlm contract).
-		convertToLlm: toLlmMessages,
+		convertToLlm: kind === "teacher" ? messages => toLlmMessages(projectPlanContext(messages)) : toLlmMessages,
 		...(opts.contextUpdates ? { prepareNextTurnWithContext: ({ context }: { context: { messages: AgentMessage[] } }) => {
 			const messages = opts.contextUpdates!(context.messages);
 			return messages.length ? { messages } : undefined;
@@ -352,9 +363,10 @@ export function createTeacherAgent(
 	ctx?: TeacherToolContext,
 	opts: AgentBuildOptions = {},
 ) {
-	const tools = opts.tools ?? (ctx ? createTeacherTools(ctx, opts.toolToggles) : bareQuestionTools());
-	return baseAgentOptions("teacher", opts, Object.values(tools), ctx
-		? nodeId => ctx.chatStore.getChat(ctx.chatId)?.tree?.nodes.some(node => node.id === nodeId) ?? false
+	const liveCtx = ctx && opts.tools === undefined ? { ...ctx, chatStore: planToolTurnStore(ctx.chatStore) } : ctx;
+	const tools = opts.tools ?? (liveCtx ? createTeacherTools(liveCtx, opts.toolToggles) : bareQuestionTools());
+	return baseAgentOptions("teacher", opts, Object.values(tools), liveCtx
+		? (nodeId, graphId) => activePlanNodeProblem(liveCtx.chatStore.getChat(liveCtx.chatId), nodeId, graphId) === null
 		: undefined);
 }
 

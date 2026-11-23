@@ -27,6 +27,7 @@ import {
 	type TeacherToolContext,
 } from "../src/agent/tools.ts";
 import { TOGGLEABLE_TOOLS } from "../src/core/pending.ts";
+import { ROOT_PLAN_GRAPH_ID } from "../src/core/contracts/plan.ts";
 import { jobStore } from "../src/store/jobs.ts";
 import { probeQuizInputSchema, quizInputObject, quizInputProblems } from "../src/core/question-core.ts";
 import { chatStore } from "../src/store/chats.ts";
@@ -90,6 +91,26 @@ const problemLines = (r?: AgentToolResult<{ tool: string; problems: string[] }>)
 	r?.details.problems ?? [];
 
 describe("teachQuizToolFor: the dynamic plan-nodeId validation (position signal)", () => {
+	it("checks both the graph and node for quiz and explain", async () => {
+		const chatId = newChat("Graph-scoped questions");
+		const graph = { version: 1, nodes: [{ id: "arith", title: "Arithmetic" }], edges: [] };
+		chatStore.saveTree(chatId, graph);
+		const child = chatStore.saveNestedPlanGraph(chatId, ROOT_PLAN_GRAPH_ID, "arith", graph);
+		const ctx = { chatId, chatStore };
+		for (const [tool, input] of [
+			[teachQuizToolFor(ctx), validQuiz],
+			[teachExplainToolFor(ctx), { type: "check", nodeId: "arith", question: "What is 2 + 2?", correctAnswer: "4" }],
+		] as const) {
+			chatStore.saveActivePlanGraph(chatId, ROOT_PLAN_GRAPH_ID);
+			assert.equal((await boundaryParse(tool, input)).success, true);
+			assert.equal((await boundaryParse(tool, { ...input, graphId: child })).success, false);
+			chatStore.saveActivePlanGraph(chatId, child);
+			assert.equal((await boundaryParse(tool, input)).success, false);
+			assert.equal((await boundaryParse(tool, { ...input, graphId: child })).success, true);
+			assert.equal((await boundaryParse(tool, { ...input, graphId: child, nodeId: "missing" })).success, false);
+		}
+	});
+
 	it("accepts a nodeId that matches a node of the session's tree", async () => {
 		const chatId = newChat("NodeId: valid");
 		chatStore.saveTree(chatId, {
@@ -302,10 +323,10 @@ describe("tool toggles (core/pending.ts + factories)", () => {
 			spawn: () => {},
 		};
 		const full = Object.keys(createTeacherTools(ctx)).sort();
-		assert.deepEqual(full, ["ask_user_question", "demo", "find", "grep", "ls", "pdf", "plan_init", "quiz", "read", "research", "show_image", "visual"]);
+		assert.deepEqual(full, ["ask_user_question", "demo", "find", "grep", "ls", "pdf", "plan_enter", "plan_init", "plan_leave", "quiz", "read", "research", "show_image", "visual"]);
 
 		const noResearch = Object.keys(createTeacherTools(ctx, { research: false })).sort();
-		assert.deepEqual(noResearch, ["ask_user_question", "demo", "find", "grep", "ls", "pdf", "plan_init", "quiz", "read", "show_image", "visual"]);
+		assert.deepEqual(noResearch, ["ask_user_question", "demo", "find", "grep", "ls", "pdf", "plan_enter", "plan_init", "plan_leave", "quiz", "read", "show_image", "visual"]);
 
 		// absent = enabled: an empty record and undefined behave identically
 		assert.deepEqual(
@@ -316,7 +337,7 @@ describe("tool toggles (core/pending.ts + factories)", () => {
 
 		// The mechanic switch (owner 2026-09-27): free-recall swaps the teach
 		// quiz for the teach explain — one quizzing tool, whichever is armed.
-		const freeFull = ["ask_user_question", "demo", "explain", "find", "grep", "ls", "pdf", "plan_init", "read", "research", "show_image", "visual"];
+		const freeFull = ["ask_user_question", "demo", "explain", "find", "grep", "ls", "pdf", "plan_enter", "plan_init", "plan_leave", "read", "research", "show_image", "visual"];
 		assert.deepEqual(Object.keys(createTeacherTools(ctx, { explain: true })).sort(), freeFull);
 		assert.deepEqual(
 			Object.keys(createTeacherTools(ctx, { explain: true, research: false })).sort(),

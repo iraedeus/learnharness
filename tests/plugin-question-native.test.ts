@@ -14,7 +14,7 @@ const originalFetch = globalThis.fetch;
 globalThis.fetch = async () => { throw new Error("Unexpected network in isolated native-question tests"); };
 after(() => { globalThis.fetch = originalFetch; fs.rmSync(root, { recursive: true, force: true }); });
 const { preparePluginQuestionType, readPluginQuestionSnapshot } = await import("../src/core/plugin-questions.ts");
-const { createProberAgent } = await import("../src/agent/teacher-agent.ts");
+const { createProberAgent, createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 const { runPiTurn } = await import("../src/server/pi/ui-stream.ts");
 const { newUserMessage, pendingPluginQuestionOf, toLlmMessages } = await import("../src/core/native-messages.ts");
 const { preparePluginQuestionAnswer, preparePluginQuestionDismissal, pluginQuestionCompatibilityAppends, pluginQuestionAvailabilityOf } = await import("../src/server/plugin-questions.ts");
@@ -92,6 +92,38 @@ test("validated native pose binds normalized immutable input, exact remapped occ
 		}
 	}
 	assert(!JSON.stringify(toLlmMessages(canonical)).includes("lhQuestions"));
+});
+
+test("native teaching plugin poses only a question tagged with the active graph", async () => {
+	const { chatStore } = await import("../src/store/chats.ts");
+	const { jobStore } = await import("../src/store/jobs.ts");
+	const { ROOT_PLAN_GRAPH_ID } = await import("../src/core/contracts/plan.ts");
+	const chat = chatStore.createChat("Nested teaching plugin fixture");
+	const tree = { version: 1, nodes: [{ id: "shared", title: "Shared" }], edges: [] };
+	chatStore.saveTree(chat.id, tree);
+	const graphId = chatStore.saveNestedPlanGraph(chat.id, ROOT_PLAN_GRAPH_ID, "shared", tree);
+	chatStore.saveActivePlanGraph(chat.id, graphId);
+	const teachingDefinition = preparePluginQuestionType({
+		...definition, teach: { toolName: "plugin_teach_code", description: "Pose a teaching question." },
+	});
+	const input = { type: "check", nodeId: "shared", question: "Write a value.", payload: { privateReference: "SECRET" } };
+	const faux = createFauxCore({});
+	faux.setResponses([fauxAssistantMessage([
+		fauxToolCall("plugin_teach_code", input, { id: "wrong-graph" }),
+		fauxToolCall("plugin_teach_code", { ...input, graphId }, { id: "active-graph" }),
+	], { stopReason: "toolUse" })]);
+	const agent = createTeacherAgent({ chatId: chat.id, chatStore, jobStore, spawn() {} }, {
+		chatId: chat.id, messages: [newUserMessage("Start")],
+		engine: { model: faux.getModel(), streamFn: faux.streamSimple },
+		pluginContributions: () => ({ instructions: [], tools: [], questionTypes: [{ ...contribution, variant: "teach", definition: teachingDefinition }] }),
+	});
+	let canonical: LhMessage[] = [];
+	const handle = runPiTurn({ agent, onFinish(messages) { canonical = messages as LhMessage[]; } });
+	await new Response(handle.subscribe()).text();
+	assert(canonical.some(message => message.role === "toolResult" && message.toolCallId === "wrong-graph" && message.isError));
+	const posed = pendingPluginQuestionOf(canonical);
+	assert.equal(posed?.occurrence.toolCallId, "active-graph");
+	assert.equal(posed?.input.graphId, graphId);
 });
 
 test("a successful pose stops a mixed batch despite a failed sibling; ordinary results and failed attempts persist", async () => {
@@ -209,7 +241,6 @@ test("chat-handler saves the genuine native answer before teacher construction, 
 	const { handleChatInput } = await import("../src/server/chat-handler.ts");
 	const { runningTurn } = await import("../src/server/turn-runs.ts");
 	const { isTurnRunning, beginTurn, endTurn } = await import("../src/server/turn-liveness.ts");
-	const { createTeacherAgent } = await import("../src/agent/teacher-agent.ts");
 	const dismiss = await import("../app/api/chats/[id]/dismiss/route.ts");
 	const recordRoute = await import("../app/api/chats/[id]/route.ts");
 	process.env.OPENROUTER_API_KEY = "isolated-test-fixture-only";

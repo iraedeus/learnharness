@@ -368,9 +368,9 @@ export function serializeForSummary(messages: readonly LhMessage[]): string {
  * persists through compaction). Structure from record.tree, statuses
  * derived from the transcript (the record's own law: the tree carries
  * structure only). Empty tree → absent section (nothing persisted). */
-export function planTreeToText(tree: PlanTree | undefined, messages: readonly LhMessage[]): string | null {
+export function planTreeToText(tree: PlanTree | undefined, messages: readonly LhMessage[], graphId?: string): string | null {
 	if (!tree || tree.nodes.length === 0) return null;
-	const statuses = derivePlanStatusesLh(tree, messages);
+	const statuses = derivePlanStatusesLh(tree, messages, graphId);
 	const byId = new Map(tree.nodes.map((n) => [n.id, n]));
 	const lines: string[] = [];
 	for (const node of tree.nodes) {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { QUESTION_TOOLS, type ArtifactPartProps, type LhViewPart, type PluginCodeBlockProps, type PluginToolRenderProps } from "@/src/core";
+import { PLAN_TRANSITION_TOOLS, QUESTION_TOOLS, type ArtifactPartProps, type LhViewPart, type PluginCodeBlockProps, type PluginToolRenderProps } from "@/src/core";
 import { usePlugins } from "@/components/plugins";
 import { type CodeBlockRegistration, type ToolRendererRegistration, type PluginMount } from "@/components/plugin-manager";
 import { artifactRenderers } from "@/components/artifacts";
@@ -13,10 +13,12 @@ import { JobsContext } from "@/components/jobs-context";
 /** The Markdown dispatch uses this same exclusive built-in language. */
 export const BUILTIN_MERMAID_LANGUAGE = "mermaid";
 
+const planToolNames: readonly string[] = ["plan_init", ...PLAN_TRANSITION_TOOLS];
+
 /** Only actual exclusive presentation claims: not every backend/internal tool.
  * A function avoids eager access across the existing artifact/chat module cycle. */
 export function reservedToolRendererNames(): string[] {
-	return [...new Set([...Object.keys(artifactRenderers), ...QUESTION_TOOLS, "plan_init"])];
+	return [...new Set([...Object.keys(artifactRenderers), ...QUESTION_TOOLS, ...planToolNames])];
 }
 
 function RendererMount({ registration, mount, label, fallback }: {
@@ -111,7 +113,7 @@ export function ToolPartRenderer({ part }: { part: LhViewPart }) {
 	if (part.pluginQuestion) return <p role="status" className="text-xs text-muted-foreground">Question unavailable</p>;
 	const toolName = part.type.slice("tool-".length);
 	const Builtin = Object.hasOwn(artifactRenderers, toolName) ? artifactRenderers[toolName] : undefined;
-	const reserved = Builtin || toolName === "plan_init" || (QUESTION_TOOLS as readonly string[]).includes(toolName);
+	const reserved = Builtin || planToolNames.includes(toolName) || (QUESTION_TOOLS as readonly string[]).includes(toolName);
 	if (reserved && part.state === "input-streaming") return <LiveToolCard part={part as ArtifactPartProps["part"]} />;
 	if (Builtin) return <Builtin part={part as ArtifactPartProps["part"]} />;
 	if (reserved) return null;

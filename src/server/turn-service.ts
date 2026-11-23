@@ -21,6 +21,7 @@ import type { LhMessage } from "../core/native-messages.ts";
 import { newMessageId } from "../core/native-messages.ts";
 import { QUESTION_TOOLS } from "../core/pending.ts";
 import { planBlocksFor } from "../core/plan-blocks.ts";
+import { PLAN_TRANSITION_TOOLS, readPlanTransition, type PlanToolResult } from "../core/contracts/plan.ts";
 import { coverageOf } from "../core/coverage.ts";
 import type { ChatStore, GraphStore } from "../core/ports.ts";
 import type { ExtractionPipeline } from "../agent/subagents/extraction.ts";
@@ -84,7 +85,18 @@ export function persistTurn(
 			...record.messages,
 			...stamped,
 		]);
-		chatStore.saveMessages(chatId, [...record.messages, ...stamped, ...blocks]);
+		let activeGraphId: string | undefined;
+		for (const message of stamped) {
+			if (message.role !== "toolResult" || message.isError) continue;
+			if (PLAN_TRANSITION_TOOLS.some(name => name === message.toolName)) {
+				const transition = readPlanTransition(message.details);
+				if (transition) activeGraphId = transition.kind === "enter" ? transition.graph.id : transition.parentGraphId;
+			} else if (message.toolName === "plan_init") {
+				const result = message.details as PlanToolResult | undefined;
+				if (result?.ok === true && typeof result.activeGraphId === "string") activeGraphId = result.activeGraphId;
+			}
+		}
+		chatStore.saveMessages(chatId, [...record.messages, ...stamped, ...blocks], activeGraphId);
 		return stamped;
 	} catch (err) {
 		console.error(`[chat ${chatId}] persist failed:`, err, { isAborted });

@@ -63,11 +63,15 @@ export interface ChatStore {
 	listChats(): ChatSummary[];
 	/** Persist the full native message list (the record IS the agent
 	 * state — Wave B, owner-approved 2026-09-26). */
-	saveMessages(id: string, messages: LhMessage[]): void;
+	saveMessages(id: string, messages: LhMessage[], activeGraphId?: string): void;
 	/** Save a processed picture once, without changing conversation activity/order. */
 	saveImageSnapshot(id: string, snapshotId: string, image: ImageSnapshot): void;
 	/** Persist the session plan tree (plan tools call this in execute). */
 	saveTree(id: string, tree: PlanTree): void;
+	/** Save the child of a reachable node, reusing its graph id on rewrites. */
+	saveNestedPlanGraph(id: string, parentGraphId: string, parentNodeId: string, tree: PlanTree, activate?: boolean): string;
+	/** Store the current graph. The graph must be reachable from the root. */
+	saveActivePlanGraph(id: string, graphId: string): void;
 	/** Append one usage entry to the record's turn log (the money channel,
 	 * 2026-09): idempotent per turn id — each request carries its own, so
 	 * a turn persisted twice appends once while continuation turns (which

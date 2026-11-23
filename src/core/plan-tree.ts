@@ -1,4 +1,57 @@
-import type { PlanEdge, PlanNode, PlanTree } from "./contracts.ts";
+import type { ChatRecord } from "./contracts/chat.ts";
+import { ROOT_PLAN_GRAPH_ID, type PlanEdge, type PlanNode, type PlanTree } from "./contracts/plan.ts";
+
+export type SessionPlan = Pick<ChatRecord, "tree" | "nestedPlanGraphs" | "activeGraphId">;
+
+/** Detached graphs remain addressable by id for historical questions. */
+export function planGraphTree(plan: SessionPlan, graphId: string): PlanTree | undefined {
+	return graphId === ROOT_PLAN_GRAPH_ID ? plan.tree : plan.nestedPlanGraphs?.find(graph => graph.id === graphId)?.tree;
+}
+
+/** Resolve the reachable prefix from the root to the requested graph. */
+export function planGraphPath(plan: SessionPlan, graphId = plan.activeGraphId ?? ROOT_PLAN_GRAPH_ID): string[] {
+	if (!plan.tree) return [];
+	const path = [ROOT_PLAN_GRAPH_ID];
+	if (graphId === ROOT_PLAN_GRAPH_ID) return path;
+	const graphs = new Map(plan.nestedPlanGraphs?.map(graph => [graph.id, graph]));
+	const ancestors = [];
+	const seen = new Set<string>();
+	while (graphId !== ROOT_PLAN_GRAPH_ID) {
+		const graph = graphs.get(graphId);
+		if (!graph || seen.has(graphId)) return path;
+		seen.add(graphId);
+		ancestors.push(graph);
+		graphId = graph.parentGraphId;
+	}
+	let parentTree = plan.tree;
+	for (const graph of ancestors.reverse()) {
+		if (!parentTree.nodes.some(node => node.id === graph.parentNodeId)) break;
+		path.push(graph.id);
+		parentTree = graph.tree;
+	}
+	return path;
+}
+
+export function activePlanNodeProblem(plan: SessionPlan | null, nodeId: string, graphId = ROOT_PLAN_GRAPH_ID): {
+	message: string;
+	planGraphMismatch?: true;
+} | null {
+	const activeGraphId = plan && planGraphPath(plan).at(-1);
+	const unknownNode = `nodeId "${nodeId}" matches no node in this session's plan map. `;
+	const noPlan = "No plan map exists yet — call plan_init before posing quizzes.";
+	if (!plan || !activeGraphId) return { message: unknownNode + noPlan };
+	if (graphId !== activeGraphId) return {
+		message: `Use the active plan graph id "${activeGraphId}" for this question.`,
+		planGraphMismatch: true,
+	};
+	const known = planGraphTree(plan, graphId)?.nodes.map(node => node.id) ?? [];
+	if (known.includes(nodeId)) return null;
+	return {
+		message: unknownNode + (known.length > 0
+			? `Copy one of ${graphId === ROOT_PLAN_GRAPH_ID ? "your plan_init slugs" : "the active graph's node ids"} exactly (${known.slice(0, 5).join(", ")}${known.length > 5 ? ", …" : ""}).`
+			: noPlan),
+	};
+}
 
 /**
  * Pure, validated plan-tree operations (vision §2 "the formal plan tree").

@@ -349,7 +349,8 @@ describe("plan popup (live derivation)", () => {
 		assert.doesNotMatch(html, /animate-pulse/);
 		// Arrows into not-yet-visited nodes are grayed out (owner, round 6).
 		assert.match(html, /marker-end="url\(#.*-dim\)"/);
-		assert.match(html, /live — statuses derive from your check outcomes/);
+		assert.match(html, /aria-label="Plan path"/);
+		assert.match(html, /data-current-node="b"/);
 		// No top-left flash: at static render settled=false, so the diagram
 		// wrapper paints at opacity 0 — the fit runs in an effect AFTER the
 		// first paint and the chart would otherwise flash at the initial
